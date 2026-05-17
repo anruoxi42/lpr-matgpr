@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LPR matGPR 数据分析平台</title>
+  <link rel="stylesheet" href="./src/styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div>
+        <div class="brand">LPR matGPR</div>
+        <div class="sub">CE-3 .2B 优先 · Current/Input/Output 数据流</div>
+      </div>
+      <div id="dataset-title" class="dataset-title">未加载数据</div>
+      <div class="status-dot"><span></span> 本地服务</div>
+    </header>
+
+    <nav id="nav" class="nav">
+      <div class="nav-group">
+        <button>数据</button>
+        <div class="menu">
+          <button data-action="open-import">数据导入</button>
+          <button data-action="hold-output">Hold Processed Data</button>
+          <button data-action="discard-output">Discard Processed Data</button>
+          <button data-action="open-undo">Undo / Restore</button>
+          <button data-action="save-mgp">Save to MGP/MAT</button>
+          <button data-action="save-depth">Save Depth Migrated Data</button>
+          <button data-page="export">Export</button>
+        </div>
+      </div>
+      <div class="nav-group">
+        <button>数据处理</button>
+        <div class="menu">
+          <button data-process="signal-position">调整信号位置</button>
+          <button data-process="trim-time">定时窗口</button>
+          <button data-process="bad-traces">删除不良痕迹</button>
+          <button data-process="remove-dc">去均值 Remove DC</button>
+          <button data-process="dewow">去低频 Dewow</button>
+          <button data-process="dzt-gain">Remove DZT header gain</button>
+          <button data-process="equalize">均衡轨迹</button>
+          <button data-process="resample-time">重采样时间轴</button>
+          <button data-process="resample-scan">重采样扫描轴</button>
+          <button data-process="equal-spacing">转换为等间距</button>
+        </div>
+      </div>
+      <div class="nav-group">
+        <button>增益处理</button>
+        <div class="menu">
+          <button data-process="agc">Standard AGC</button>
+          <button data-process="gagc">Gaussian-tapered AGC</button>
+          <button data-process="power-gain">Inverse Power Decay</button>
+          <button data-process="amplitude-gain">Inverse Amplitude Decay</button>
+        </div>
+      </div>
+      <div class="nav-group">
+        <button>滤波</button>
+        <div class="menu">
+          <button data-process="global-bg">Remove Global Background</button>
+          <button data-process="horizontal">Suppress Horizontal Features</button>
+          <button data-process="dipping">Suppress Dipping Features</button>
+          <button data-process="fir-frequency">FIR Frequency Filter</button>
+          <button data-process="fir-wavenumber">FIR Wavenumber Filter</button>
+          <button data-process="fk-filter">F-K Filter</button>
+          <button data-process="kl-filter">Karhunen-Loeve Filter</button>
+          <button data-process="advanced-placeholder">Curvelet / Wavelet / Tau-P / F-X</button>
+        </div>
+      </div>
+      <div class="nav-group">
+        <button>可视化</button>
+        <div class="menu">
+          <button data-page="radar">雷达剖面图</button>
+          <button data-action="open-trace">道查看器</button>
+          <button data-action="open-spectrum">频谱查看器</button>
+          <button data-action="show-instant">瞬时属性</button>
+          <button data-action="show-centroid">质心频率</button>
+          <button data-action="show-attenuation">衰减特征</button>
+        </div>
+      </div>
+      <div class="nav-group">
+        <button>速度分析</button>
+        <div class="menu">
+          <button data-page="velocity">Fit Diffraction Hyperbola</button>
+          <button data-action="velocity-calc">Simple Velocity Calculator</button>
+          <button data-action="velocity-1d">1-D velocity model</button>
+          <button data-action="velocity-2d">2-D velocity model</button>
+        </div>
+      </div>
+      <div class="nav-group">
+        <button>Imaging</button>
+        <div class="menu">
+          <button data-process="stolt">1-D F-K / Stolt Migration</button>
+          <button data-process="gazdag">1-D Phase-shift / Gazdag</button>
+          <button data-process="time-depth">Time-to-Depth Conversion</button>
+          <button data-process="pspi">2-D PSPI Migration</button>
+          <button data-process="split-step">2-D Split-step Fourier</button>
+        </div>
+      </div>
+      <div class="nav-group">
+        <button>建模与解释</button>
+        <div class="menu">
+          <button data-page="interpret">地质解释</button>
+          <button data-page="model">Build 2-D Model</button>
+          <button data-action="forward">正演模拟</button>
+        </div>
+      </div>
+      <div class="nav-group">
+        <button>3-D Utilities</button>
+        <div class="menu">
+          <button data-action="make-xyz">Make XYZ</button>
+          <button data-action="create-3d">Create 3-D Data</button>
+          <button data-page="three">GPR-Slice / 3-D Slices / Isosurface</button>
+        </div>
+      </div>
+    </nav>
+
+    <main class="workspace">
+      <section id="page-radar" class="page active">
+        <div class="toolbar">
+          <input id="file-input" type="file" accept=".2b,.2B" multiple hidden>
+          <button class="primary" data-action="open-import">导入 .2B</button>
+          <button data-action="open-trace">道查看器</button>
+          <button data-action="open-spectrum">频谱查看器</button>
+          <button data-action="hold-output">Hold</button>
+          <button data-action="discard-output">Discard</button>
+          <button data-action="open-undo">Undo</button>
+          <label>显示
+            <select id="display-mode">
+              <option value="current">Current Input Data</option>
+              <option value="output">Output Data</option>
+            </select>
+          </label>
+          <label>色标
+            <select id="colormap">
+              <option value="jet">Jet</option>
+              <option value="gray">Gray</option>
+              <option value="seismic">Seismic</option>
+              <option value="hot">Hot</option>
+            </select>
+          </label>
+          <label>Min <input id="amp-min" type="number" value="-10" step="0.5"></label>
+          <label>Max <input id="amp-max" type="number" value="10" step="0.5"></label>
+        </div>
+        <div id="drop-zone" class="drop-zone">
+          <strong>拖拽 .2B 文件到此处，或点击“导入 .2B”</strong>
+          <span>支持 CE-3 LPR 8307 字节/道 · 2048 样点 · float32 小端样点</span>
+        </div>
+        <div id="radar-wrap" class="radar-wrap">
+          <canvas id="radar-canvas"></canvas>
+        </div>
+      </section>
+
+      <section id="page-export" class="page">
+        <div class="panel narrow">
+          <h2>保存和导出</h2>
+          <p class="muted">.2B、内部 MGP/MAT JSON、深度偏移、SEG-Y、DZT、SU、PNG/PDF 报告。</p>
+          <label>数据源
+            <select id="export-source">
+              <option value="current">Current Input Data</option>
+              <option value="output">Output Data</option>
+            </select>
+          </label>
+          <div class="export-grid">
+            <button data-export="2b">导出 .2B</button>
+            <button data-export="mgp">Save MGP/MAT JSON</button>
+            <button data-export="depth">Save Depth Migrated</button>
+            <button data-export="segy">SEG-Y Rev 1</button>
+            <button data-export="dzt">DZT</button>
+            <button data-export="su">SU</button>
+            <button data-export="png">PNG</button>
+            <button data-export="pdf">PDF</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-velocity" class="page split">
+        <div class="canvas-card">
+          <canvas id="velocity-canvas"></canvas>
+        </div>
+        <aside class="panel">
+          <h2>绕射双曲线拟合</h2>
+          <p class="muted">在剖面上点击设置顶点，滚轮调速度。</p>
+          <label>速度 V (m/ns)<input id="vel-v" type="number" value="0.100" min="0.03" max="0.3" step="0.002"></label>
+          <label>顶点道号<input id="vel-x0" type="number" value="100" step="1"></label>
+          <label>顶点样点<input id="vel-z0" type="number" value="250" step="1"></label>
+          <label>道间距 dx (m)<input id="vel-dx" type="number" value="0.05" step="0.01"></label>
+          <label>采样 dt (ns)<input id="vel-dt" type="number" value="0.625" step="0.001"></label>
+          <button id="save-velocity" class="primary">保存速度点</button>
+          <div id="velocity-list" class="list muted">暂无速度点</div>
+        </aside>
+      </section>
+
+      <section id="page-model" class="page split">
+        <div class="canvas-card">
+          <canvas id="model-canvas"></canvas>
+        </div>
+        <aside class="panel">
+          <h2>Build 2-D Model</h2>
+          <label>背景 εr<input id="model-epsr" type="number" value="9" step="0.1"></label>
+          <label>背景 σ<input id="model-sigma" type="number" value="0" step="0.001"></label>
+          <label>背景 μ<input id="model-mu" type="number" value="1" step="0.1"></label>
+          <div class="button-row">
+            <button data-model-tool="select">选择</button>
+            <button data-model-tool="circle">圆形</button>
+            <button data-model-tool="polygon">多边形</button>
+          </div>
+          <div class="button-row">
+            <button id="model-export">保存 JSON</button>
+            <button id="model-velocity">生成 2-D 速度场</button>
+          </div>
+          <div id="model-list" class="list muted">暂无物体</div>
+        </aside>
+      </section>
+
+      <section id="page-interpret" class="page">
+        <div class="panel narrow">
+          <h2>地质解释</h2>
+          <p>在偏移或时深转换结果上结合点、线、框标注识别界面、空洞、管线、破碎带等异常。</p>
+          <button data-action="open-trace">打开道查看器</button>
+          <button data-action="show-attenuation">计算衰减特征</button>
+          <button data-action="save-report">导出解释报告 JSON</button>
+          <div id="interpret-output" class="list muted">解释结果将在这里显示。</div>
+        </div>
+      </section>
+
+      <section id="page-three" class="page">
+        <div class="panel narrow">
+          <h2>3-D Utilities</h2>
+          <p class="muted">第一版支持把多条二维剖面按固定测线间距合成为体数据，并显示 X/Y/Z 切片。</p>
+          <label>测线间距 Y (m)<input id="three-dy" type="number" value="1" step="0.1"></label>
+          <button data-action="create-3d">Create 3-D Data</button>
+          <label>切片方向
+            <select id="three-axis">
+              <option value="z">Z 时间/深度切片</option>
+              <option value="x">X 纵切片</option>
+              <option value="y">Y 横切片</option>
+            </select>
+          </label>
+          <label>切片索引<input id="three-index" type="number" value="0"></label>
+          <div class="slice-wrap"><canvas id="three-canvas"></canvas></div>
+          <div id="three-info" class="muted">尚未生成 3D 数据。</div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="side">
+      <h3>数据状态</h3>
+      <div id="state-panel" class="state-panel">暂无数据</div>
+      <h3>处理历史</h3>
+      <div id="history-panel" class="history-panel">暂无历史</div>
+    </aside>
+
+    <footer class="footer">
+      <span id="footer-status">就绪</span>
+      <span id="cursor-status"></span>
+    </footer>
+  </div>
+
+  <div id="trace-window" class="float-window">
+    <div class="float-head"><span>道查看器</span><button data-close="trace-window">×</button></div>
+    <div class="viewer-controls">
+      <button data-trace-step="-1">◀</button>
+      <input id="trace-index" type="number" value="0" min="0">
+      <button data-trace-step="1">▶</button>
+      <span id="trace-stats"></span>
+    </div>
+    <canvas id="trace-canvas"></canvas>
+  </div>
+
+  <div id="spectrum-window" class="float-window">
+    <div class="float-head"><span>频谱查看器</span><button data-close="spectrum-window">×</button></div>
+    <div class="viewer-controls">
+      <button data-spectrum-step="-1">◀</button>
+      <input id="spectrum-index" type="number" value="0" min="0">
+      <button data-spectrum-step="1">▶</button>
+      <button id="spectrum-mean">平均道频谱</button>
+      <span id="spectrum-stats"></span>
+    </div>
+    <canvas id="spectrum-canvas"></canvas>
+  </div>
+
+  <dialog id="process-dialog">
+    <form method="dialog">
+      <h2 id="process-title">处理参数</h2>
+      <div id="process-fields" class="dialog-fields"></div>
+      <menu>
+        <button value="cancel">取消</button>
+        <button id="run-process" value="default" class="primary">执行并预览 Output Data</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="undo-dialog">
+    <form method="dialog">
+      <h2>Undo / Restore</h2>
+      <div id="undo-list" class="dialog-fields"></div>
+      <menu>
+        <button value="cancel">关闭</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <div id="toast"></div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
