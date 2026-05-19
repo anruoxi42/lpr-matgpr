@@ -208,3 +208,234 @@ export function centroidFrequency(d, nt, ns) {
   }
   return { data: o, numTraces: nt, numSamples: ns };
 }
+
+function smoothSamples(d, nt, ns, width = 17) {
+  const o = new Float32Array(d.length), h = Math.max(1, Math.floor(width / 2));
+  for (let t = 0; t < nt; t++) {
+    let sum = 0, count = 0;
+    for (let s = 0; s < ns; s++) {
+      while (count < Math.min(ns, s + h + 1)) { sum += d[t * ns + count]; count++; }
+      const first = Math.max(0, s - h);
+      const last = Math.min(ns - 1, s + h);
+      if (s > 0) {
+        const prevFirst = Math.max(0, s - 1 - h);
+        if (prevFirst < first) sum -= d[t * ns + prevFirst];
+      }
+      o[t * ns + s] = sum / (last - first + 1);
+    }
+  }
+  return o;
+}
+
+function smoothTraces(d, nt, ns, width = 13) {
+  const o = new Float32Array(d.length), h = Math.max(1, Math.floor(width / 2));
+  for (let s = 0; s < ns; s++) {
+    let sum = 0, count = 0;
+    for (let t = 0; t < nt; t++) {
+      while (count < Math.min(nt, t + h + 1)) { sum += d[count * ns + s]; count++; }
+      const first = Math.max(0, t - h);
+      const last = Math.min(nt - 1, t + h);
+      if (t > 0) {
+        const prevFirst = Math.max(0, t - 1 - h);
+        if (prevFirst < first) sum -= d[prevFirst * ns + s];
+      }
+      o[t * ns + s] = sum / (last - first + 1);
+    }
+  }
+  return o;
+}
+
+function smoothLine(line, width = 61) {
+  const n = line.length, out = new Float32Array(n), h = Math.max(1, Math.floor(width / 2));
+  for (let i = 0; i < n; i++) {
+    let sum = 0, count = 0;
+    for (let k = i - h; k <= i + h; k++) {
+      const j = Math.max(0, Math.min(n - 1, k));
+      sum += line[j]; count++;
+    }
+    out[i] = sum / count;
+  }
+  return out;
+}
+
+function percentile(values, p) {
+  if (!values.length) return 0;
+  const a = Array.from(values).sort((x, y) => x - y);
+  const i = Math.max(0, Math.min(a.length - 1, Math.floor((a.length - 1) * p)));
+  return a[i];
+}
+
+function medianTyped(line) {
+  return percentile(line, 0.5);
+}
+
+export function geologicModel(d, nt, ns, params = {}) {
+  const dt = Number(params.dt) || 0.3125;
+  const dx = Number(params.dx) || 0.05;
+  const velocity = Number(params.velocity) || 0.1;
+  const loMHz = Number(params.loMHz) || 20;
+  const hiMHz = Number(params.hiMHz) || 900;
+  const bgWidth = Number(params.bgWidth) || 25;
+  const agcWindow = Number(params.agcWindow) || 80;
+  const modelDepthMax = Number(params.modelDepthMax) || 24;
+  const sampleRate = 1 / (dt * 1e-9);
+
+  let r = removeDC(d, nt, ns).data;
+  r = freqFilter(r, nt, ns, "bp", loMHz * 1e6, hiMHz * 1e6, sampleRate).data;
+  r = backgroundRemove(r, nt, ns).data;
+  r = slidingBackground(r, nt, ns, bgWidth, "remove").data;
+  r = agc(r, nt, ns, agcWindow, true).data;
+
+  const clip = Number(params.clip) || 4;
+  for (let i = 0; i < r.length; i++) {
+    if (r[i] > clip) r[i] = clip;
+    else if (r[i] < -clip) r[i] = -clip;
+  }
+
+  const energy = new Float32Array(r.length);
+  for (let i = 0; i < r.length; i++) energy[i] = Math.abs(r[i]);
+  const energySmoothed = smoothTraces(smoothSamples(energy, nt, ns, 17), nt, ns, 13);
+
+  const depthStep = velocity * dt / 2;
+  const startSample = Math.max(0, Math.floor((Number(params.startDepth) || 1.5) / depthStep));
+  const endSample = Math.min(ns - 2, Math.ceil((Number(params.endDepth) || Math.min(24, (ns - 1) * depthStep)) / depthStep));
+  const minSepSamples = Math.max(1, Math.round((Number(params.minHorizonSeparation) || 0.8) / depthStep));
+  const peaks = [];
+  for (let t = 0; t < nt; t++) {
+    const candidates = [];
+    for (let s = startSample + 1; s < endSample - 1; s++) {
+      const v = energySmoothed[t * ns + s];
+      if (v > energySmoothed[t * ns + s - 1] && v >= energySmoothed[t * ns + s + 1]) candidates.push({ s, v });
+    }
+    candidates.sort((a, b) => b.v - a.v);
+    const chosen = [];
+    for (const c of candidates) {
+      if (chosen.every(p => Math.abs(p.s - c.s) >= minSepSamples)) chosen.push(c);
+      if (chosen.length >= 4) break;
+    }
+    for (const c of chosen) peaks.push({ t, depth: c.s * depthStep, strength: c.v });
+  }
+
+  const binSize = 0.5, binStart = startSample * depthStep, binEnd = endSample * depthStep;
+  const binCount = Math.max(1, Math.ceil((binEnd - binStart) / binSize));
+  const hist = new Float32Array(binCount);
+  for (const p of peaks) {
+    const bi = Math.floor((p.depth - binStart) / binSize);
+    if (bi >= 0 && bi < binCount) hist[bi] += p.strength;
+  }
+
+  const histThreshold = percentile(hist, 0.72);
+  const clusters = [];
+  for (let i = 1; i < binCount - 1; i++) {
+    if (!(hist[i] >= hist[i - 1] && hist[i] > hist[i + 1] && hist[i] > histThreshold)) continue;
+    const d0 = binStart + i * binSize, d1 = d0 + binSize;
+    let sumDepth = 0, sumWeight = 0, support = 0, strength = 0;
+    for (const p of peaks) {
+      if (p.depth >= d0 - 0.75 && p.depth <= d1 + 0.75) {
+        sumDepth += p.depth * p.strength;
+        sumWeight += p.strength;
+        strength += p.strength;
+        support++;
+      }
+    }
+    if (support) clusters.push({ depth: sumDepth / Math.max(sumWeight, 1e-9), support, strength: strength / support });
+  }
+
+  const merged = [];
+  for (const c of clusters.sort((a, b) => a.depth - b.depth)) {
+    const last = merged[merged.length - 1];
+    if (last && Math.abs(c.depth - last.depth) < 0.7) {
+      const total = last.support + c.support;
+      last.depth = (last.depth * last.support + c.depth * c.support) / total;
+      last.support = total;
+      last.strength = Math.max(last.strength, c.strength);
+    } else merged.push({ ...c });
+  }
+
+  let seeds = merged.filter(c => c.support > nt * 0.22);
+  if (seeds.length < 4) seeds = merged.slice().sort((a, b) => b.support - a.support).slice(0, 6);
+  seeds = seeds.sort((a, b) => a.depth - b.depth).slice(0, Number(params.maxHorizons) || 6);
+
+  const labels = [
+    "upper regolith / disturbed shallow layer",
+    "layered regolith unit A",
+    "layered regolith unit B",
+    "strong reflector package",
+    "deeper weakly resolved material",
+    "deep noisy tail",
+    "unclassified"
+  ];
+  const meanings = [
+    "Upper disturbed regolith above the first continuous reflector.",
+    "Layered regolith package bounded by shallow continuous reflectors.",
+    "Thin layered transition with a clear dielectric contrast.",
+    "Laterally persistent strong reflection package.",
+    "Weakly resolved material below the tracked reflector package.",
+    "Deep interval with lower continuity and higher uncertainty."
+  ];
+
+  const horizons = [];
+  const halfWindow = Number(params.trackHalfWindow) || 0.85;
+  for (let i = 0; i < seeds.length; i++) {
+    const center = seeds[i].depth;
+    const s0 = Math.max(startSample, Math.floor((center - halfWindow) / depthStep));
+    const s1 = Math.min(endSample, Math.ceil((center + halfWindow) / depthStep));
+    if (s1 <= s0 + 2) continue;
+    const line = new Float32Array(nt);
+    let strength = 0;
+    for (let t = 0; t < nt; t++) {
+      let bestS = s0, bestV = -Infinity;
+      for (let s = s0; s <= s1; s++) {
+        const v = energySmoothed[t * ns + s];
+        if (v > bestV) { bestV = v; bestS = s; }
+      }
+      line[t] = bestS * depthStep;
+      strength += bestV;
+    }
+    const smooth = smoothLine(line, 61);
+    let minDepth = Infinity, maxDepth = -Infinity, mean = 0;
+    for (const z of smooth) { minDepth = Math.min(minDepth, z); maxDepth = Math.max(maxDepth, z); mean += z; }
+    mean /= smooth.length || 1;
+    horizons.push({
+      name: `H${i + 1}`,
+      meanDepth: mean,
+      medianDepth: medianTyped(smooth),
+      minDepth,
+      maxDepth,
+      support: seeds[i].support,
+      meanStrength: strength / nt,
+      layerName: labels[Math.min(i, labels.length - 1)],
+      meaning: meanings[Math.min(i, meanings.length - 1)],
+      line: smooth
+    });
+  }
+
+  const modelSamples = Number(params.modelSamples) || 480;
+  const modelData = new Uint8Array(modelSamples * nt);
+  const zStep = modelDepthMax / Math.max(1, modelSamples - 1);
+  for (let z = 0; z < modelSamples; z++) {
+    const depth = z * zStep;
+    for (let t = 0; t < nt; t++) {
+      let layer = 0;
+      for (const h of horizons) if (depth >= h.line[t]) layer++;
+      modelData[z * nt + t] = Math.min(layer, labels.length - 1);
+    }
+  }
+
+  return {
+    data: r,
+    numTraces: nt,
+    numSamples: ns,
+    modelData,
+    modelTraces: nt,
+    modelSamples,
+    modelDepthMax,
+    depthStep,
+    distanceStep: dx,
+    velocity,
+    epsilonR: (0.299792458 / velocity) ** 2,
+    horizons,
+    layerNames: labels,
+    params: { dt, dx, velocity, loMHz, hiMHz, bgWidth, agcWindow, modelDepthMax }
+  };
+}

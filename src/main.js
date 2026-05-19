@@ -1,4 +1,4 @@
-import { parse2BFile, write2BFile, writeMgpJson, writeSEGYLike } from "./io/twoB.js";
+import { parse2BFile, write2BFile, writeMgpJson, writeSEGYLike, writeSEGYFile, writeDZTFile } from "./io/twoB.js";
 import { IpdStore } from "./processing/ipdStore.js";
 import { spectrum } from "./processing/algorithms.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
@@ -11,6 +11,10 @@ let threeVolume = null;
 let velocityPoints = [];
 let model = { background: { epsr: 9, sigma: 0, mu: 1 }, objects: [] };
 let modelTool = "select";
+let radarSelections = [];
+let radarAnnotations = [];
+let lastMergedSelection = null;
+let geologyResult = null;
 
 const $ = sel => document.querySelector(sel);
 const $$ = sel => [...document.querySelectorAll(sel)];
@@ -18,6 +22,23 @@ const radar = new RadarRenderer($("#radar-canvas"), $("#radar-wrap"), (t, s, amp
   $("#cursor-status").textContent = t == null ? "" : `道 ${t} · 样点 ${s} · 振幅 ${amp.toFixed(5)}`;
   if (t != null) syncTraceIndex(t, false);
 });
+
+radar.callbacks = {
+  onSelection(sel) {
+    radarSelections.push(normalizeSelection(sel));
+    updateSelectionPanel();
+    toast(`选区 #${radarSelections.length} 已添加`);
+  },
+  onAnnotation(ann) {
+    radarAnnotations.push(ann);
+    radar.setAnnotations(radarAnnotations);
+    updateAnnotationPanel();
+    toast("标注已添加");
+  },
+  onMeasure(a, b) {
+    toast(`测量: Δ道 ${Math.abs(b.t - a.t)}, Δ样点 ${Math.abs(b.s - a.s)}`);
+  }
+};
 
 function currentDisplayed() {
   return displaySource === "output" && store.output ? store.output : store.current;
@@ -78,6 +99,7 @@ async function importFiles(files) {
       $("#footer-status").textContent = `正在解析 ${file.name}`;
       const parsed = parse2BFile(await file.arrayBuffer());
       store.loadDataset({ ...parsed, name: file.name, fileSize: file.size, loadedAt: new Date().toLocaleString("zh-CN") });
+      clearInteractionState();
       toast(`${file.name} 导入成功`);
       $("#footer-status").textContent = "导入完成";
       switchPage("radar");
@@ -150,6 +172,7 @@ function switchPage(name) {
   if (name === "velocity") renderVelocity();
   if (name === "model") renderModel();
   if (name === "three") renderThree();
+  if (name === "interpret") drawGeologyResult();
 }
 
 function openFloat(id) {
@@ -270,6 +293,269 @@ function renderThree() {
   ctx.putImageData(img,0,0);
 }
 
+function normalizeSelection(sel) {
+  return { startT: Math.min(sel.startT, sel.endT), endT: Math.max(sel.startT, sel.endT) };
+}
+function clearInteractionState() {
+  radarSelections = [];
+  radarAnnotations = [];
+  lastMergedSelection = null;
+  geologyResult = null;
+  radar.setSelections([]);
+  radar.setAnnotations([]);
+  updateSelectionPanel();
+  updateAnnotationPanel();
+  if ($("#geo-report")) $("#geo-report").innerHTML = "尚未生成自动地质模型。";
+}
+function toggleFloat(id) {
+  const el = $(`#${id}`);
+  if (!el) return;
+  el.classList.toggle("show");
+}
+function setRadarMode(mode) {
+  radar.setMode(mode);
+  $$("[data-radar-mode]").forEach(btn => btn.classList.toggle("active", btn.dataset.radarMode === radar.mode));
+}
+function copyMeta(meta, indices) {
+  if (!meta) return null;
+  const out = {};
+  const keys = ["antennaId","timestamp","velocity","posX","posY","posZ","attX","attY","attZ","validLen","quality"];
+  for (const key of keys) {
+    if (!meta[key]) continue;
+    const Ctor = meta[key].constructor;
+    out[key] = new Ctor(indices.length);
+    indices.forEach((src, i) => out[key][i] = meta[key][src]);
+  }
+  out.sourceFormat = meta.sourceFormat;
+  return out;
+}
+function datasetFromSelections(source, selections) {
+  if (!source || !selections.length) return null;
+  const sorted = selections.map(normalizeSelection).sort((a, b) => a.startT - b.startT);
+  const indices = [];
+  for (const sel of sorted) {
+    const start = Math.max(0, sel.startT), end = Math.min(source.numTraces - 1, sel.endT);
+    for (let t = start; t <= end; t++) indices.push(t);
+  }
+  const data = new Float32Array(indices.length * source.numSamples);
+  indices.forEach((src, i) => data.set(source.data.subarray(src * source.numSamples, src * source.numSamples + source.numSamples), i * source.numSamples));
+  return {
+    data,
+    meta: copyMeta(source.meta, indices),
+    numTraces: indices.length,
+    numSamples: source.numSamples,
+    name: `${(source.name || "data").replace(/\.2b$/i, "")}_selection.2b`,
+    fileSize: indices.length * 8307
+  };
+}
+function updateSelectionPanel() {
+  radar.setSelections(radarSelections);
+  const list = $("#selection-list"), summary = $("#selection-summary");
+  const canExport = !!lastMergedSelection || radarSelections.length > 0;
+  $("#btn-selection-2b") && ($("#btn-selection-2b").disabled = !canExport);
+  $("#btn-selection-pdf") && ($("#btn-selection-pdf").disabled = !canExport);
+  $("#btn-selection-extract") && ($("#btn-selection-extract").disabled = !radarSelections.length);
+  if (!list || !summary) return;
+  if (!radarSelections.length) {
+    summary.textContent = lastMergedSelection ? `已合并 ${lastMergedSelection.numTraces} 道，可继续导出。` : "";
+    list.innerHTML = `<p class="muted">使用工具栏“选区”在剖面上拖拽选择道范围。</p>`;
+    drawSelectionPreview();
+    return;
+  }
+  const total = radarSelections.reduce((s, x) => s + x.endT - x.startT + 1, 0);
+  summary.textContent = `${radarSelections.length} 个选区，共 ${total} 道`;
+  list.innerHTML = radarSelections.map((s, i) => `<div class="selection-row"><b>#${i + 1}</b><span>T${s.startT}-${s.endT}</span><span>${s.endT - s.startT + 1} 道</span><button data-selection-extract="${i}">提取</button><button data-selection-zoom="${i}">缩放</button><button data-selection-remove="${i}">删除</button></div>`).join("");
+  drawSelectionPreview();
+}
+function updateAnnotationPanel() {
+  radar.setAnnotations(radarAnnotations);
+  const list = $("#annotation-list");
+  if (!list) return;
+  if (!radarAnnotations.length) {
+    list.innerHTML = `<p class="muted">暂无标注。</p>`;
+    return;
+  }
+  list.innerHTML = radarAnnotations.map((a, i) => {
+    const text = a.type === "point" ? `${a.label || "P"}: T${a.t}, S${a.s}` : `${a.type}: T${a.t1}-${a.t2}, S${a.s1}-${a.s2}`;
+    return `<div class="selection-row"><b>#${i + 1}</b><span>${text}</span><button data-annotation-remove="${i}">删除</button></div>`;
+  }).join("");
+}
+function extractSelections(index = null) {
+  const ds = currentDisplayed();
+  if (!ds) return toast("请先导入数据", "warn");
+  const selections = index == null ? radarSelections : [radarSelections[index]];
+  const merged = datasetFromSelections(ds, selections);
+  if (!merged) return toast("请先创建选区", "warn");
+  lastMergedSelection = merged;
+  store.setOutput(merged, { name: index == null ? "合并选区提取" : "单选区提取", op: "selection-extract", params: { selections } });
+  displaySource = "output"; $("#display-mode").value = "output";
+  updateSelectionPanel();
+  drawSelectionPreview();
+  toast(`提取完成：${merged.numTraces} 道，结果已放入 Output Data`);
+}
+function clearSelections() {
+  radarSelections = [];
+  lastMergedSelection = null;
+  updateSelectionPanel();
+  toast("选区已清空");
+}
+function exportSelection(kind) {
+  if (!lastMergedSelection) lastMergedSelection = datasetFromSelections(currentDisplayed(), radarSelections);
+  if (!lastMergedSelection) return toast("没有可导出的选区数据", "warn");
+  if (kind === "2b") download(write2BFile(lastMergedSelection), lastMergedSelection.name);
+  else exportPdfDocument(lastMergedSelection, `${lastMergedSelection.name.replace(/\.2b$/i, "")}.pdf`);
+}
+function colorOf(cmap, t) {
+  t = Math.max(0, Math.min(1, t));
+  if (cmap === "gray") { const v = Math.round(t * 255); return [v, v, v]; }
+  if (cmap === "seismic") return t < .5 ? [0, 0, Math.round(t * 510)] : [Math.round((t - .5) * 510), 0, Math.round((1 - (t - .5) * 2) * 255)];
+  if (cmap === "hot") return [Math.min(255, Math.round(t * 765)), Math.min(255, Math.round(Math.max(0, t * 3 - 1) * 255)), Math.min(255, Math.round(Math.max(0, t * 3 - 2) * 255))];
+  if (t < .125) return [0, 0, Math.round(128 + t / .125 * 127)];
+  if (t < .375) return [0, Math.round((t - .125) / .25 * 255), 255];
+  if (t < .625) return [Math.round((t - .375) / .25 * 255), 255, Math.round(255 - (t - .375) / .25 * 255)];
+  if (t < .875) return [255, Math.round(255 - (t - .625) / .25 * 255), 0];
+  return [Math.round(255 - (t - .875) / .125 * 127), 0, 0];
+}
+function renderDatasetCanvas(canvas, ds, opts = {}) {
+  if (!canvas || !ds) return;
+  const rect = canvas.parentElement?.getBoundingClientRect?.() || { width: canvas.width || 900, height: canvas.height || 320 };
+  const dpr = devicePixelRatio || 1, w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
+  canvas.width = w * dpr; canvas.height = h * dpr; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
+  const ctx = canvas.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  const img = ctx.createImageData(w, h), min = opts.min ?? -10, max = opts.max ?? 10, range = max - min || 1;
+  const displaySamples = Math.min(ds.numSamples, opts.sampleMax || ds.numSamples);
+  for (let y = 0; y < h; y++) {
+    const s = Math.min(ds.numSamples - 1, Math.floor(y / h * displaySamples));
+    for (let x = 0; x < w; x++) {
+      const t = Math.min(ds.numTraces - 1, Math.floor(x / w * ds.numTraces));
+      const [r,g,b] = colorOf(opts.cmap || "seismic", (ds.data[t * ds.numSamples + s] - min) / range);
+      const i = (y * w + x) * 4; img.data[i] = r; img.data[i+1] = g; img.data[i+2] = b; img.data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  if (opts.horizons?.length) {
+    ctx.lineWidth = 1.3; ctx.setLineDash([5,3]);
+    const colors = ["#ffe066","#69db7c","#74c0fc","#ff922b","#da77f2","#63e6be"];
+    opts.horizons.forEach((hzn, i) => {
+      ctx.strokeStyle = colors[i % colors.length]; ctx.beginPath();
+      const line = hzn.line || [];
+      for (let x = 0; x < w; x++) {
+        const t = Math.min(line.length - 1, Math.floor(x / w * line.length));
+        const y = (line[t] / (opts.modelDepthMax || 24)) * h;
+        x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.stroke();
+    });
+    ctx.setLineDash([]);
+  }
+}
+function drawSelectionPreview() {
+  if (!$("#selection-preview")) return;
+  renderDatasetCanvas($("#selection-preview"), lastMergedSelection, { cmap: "jet", min: -10, max: 10 });
+}
+function exportPng(ds, name) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.min(ds.numTraces, 4000); canvas.height = Math.min(ds.numSamples, 4000);
+  renderDatasetCanvas(canvas, ds, { cmap: $("#export-cmap")?.value || "gray", min: Number($("#amp-min").value || -10), max: Number($("#amp-max").value || 10) });
+  canvas.toBlob(blob => download(blob, name));
+}
+function exportPdfDocument(ds, name) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.min(ds.numTraces, 3000); canvas.height = Math.min(ds.numSamples, 2400);
+  renderDatasetCanvas(canvas, ds, { cmap: $("#export-cmap")?.value || "gray", min: -10, max: 10 });
+  const url = canvas.toDataURL("image/png");
+  const html = `<!doctype html><title>${ds.name}</title><body style="font-family:Arial,sans-serif;margin:24px"><h2>${ds.name}</h2><p>Traces: ${ds.numTraces}, Samples: ${ds.numSamples}, Created: ${new Date().toISOString()}</p><img src="${url}" style="max-width:100%"><script>print()<\/script></body>`;
+  const win = window.open("", "_blank");
+  if (win) {
+    win.document.write(html);
+    win.document.close();
+    toast("已打开打印窗口，可保存为 PDF", "warn");
+  } else {
+    download(new Blob([html], { type: "text/html" }), name.replace(/\.pdf$/i, ".html"));
+    toast("弹窗被拦截，已导出可打印 HTML", "warn");
+  }
+}
+function exportCsv(ds) {
+  const rows = [];
+  for (let s = 0; s < ds.numSamples; s++) {
+    const row = [];
+    for (let t = 0; t < ds.numTraces; t++) row.push(ds.data[t * ds.numSamples + s].toFixed(6));
+    rows.push(row.join(","));
+  }
+  return new Blob([rows.join("\n")], { type: "text/csv" });
+}
+async function runGeologyModel() {
+  const ds = currentDisplayed();
+  if (!ds) return toast("请先导入 .2B 数据", "warn");
+  const params = {
+    velocity: Number($("#geo-velocity")?.value || 0.1),
+    dt: Number($("#geo-dt")?.value || 0.3125),
+    dx: Number($("#geo-dx")?.value || 0.05),
+    loMHz: Number($("#geo-lo")?.value || 20),
+    hiMHz: Number($("#geo-hi")?.value || 900),
+    bgWidth: Number($("#geo-bg")?.value || 25),
+    agcWindow: Number($("#geo-agc")?.value || 80),
+    modelDepthMax: Number($("#geo-depth")?.value || 24)
+  };
+  $("#footer-status").textContent = "正在自动提取界面并生成地质模型";
+  try {
+    geologyResult = await runWorker("geology-model", ds, params);
+    store.setOutput({ data: geologyResult.data, numTraces: geologyResult.numTraces, numSamples: geologyResult.numSamples, name: `${ds.name || "data"}_geology_processed`, meta: ds.meta }, { name: "自动地质建模", op: "geology-model", params });
+    displaySource = "output"; $("#display-mode").value = "output";
+    drawGeologyResult();
+    $("#footer-status").textContent = "自动地质建模完成，Output Data 已生成";
+    toast("自动地质模型已生成");
+  } catch (error) {
+    toast(error.message, "err");
+    $("#footer-status").textContent = "自动地质建模失败";
+  }
+}
+function drawGeologyResult() {
+  if (!geologyResult) return;
+  renderDatasetCanvas($("#geo-radar-canvas"), { data: geologyResult.data, numTraces: geologyResult.numTraces, numSamples: geologyResult.numSamples }, {
+    cmap: "seismic", min: -2.2, max: 2.2, horizons: geologyResult.horizons, modelDepthMax: geologyResult.modelDepthMax, sampleMax: Math.ceil(geologyResult.modelDepthMax / geologyResult.depthStep)
+  });
+  drawLayerModelCanvas($("#geo-model-canvas"), geologyResult);
+  const rows = geologyResult.horizons.map(h => `<tr><td>${h.name}</td><td>${h.medianDepth.toFixed(2)} m</td><td>${h.minDepth.toFixed(2)}-${h.maxDepth.toFixed(2)} m</td><td>${h.layerName}</td><td>${h.meaning}</td></tr>`).join("");
+  $("#geo-report").innerHTML = `<div class="geo-kpis"><span>速度 ${geologyResult.velocity.toFixed(3)} m/ns</span><span>εr ${geologyResult.epsilonR.toFixed(2)}</span><span>${geologyResult.numTraces} 道 × ${geologyResult.numSamples} 样点</span></div><table class="mini-table"><thead><tr><th>界面</th><th>中值深度</th><th>范围</th><th>层位命名</th><th>含义</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function drawLayerModelCanvas(canvas, result) {
+  if (!canvas || !result) return;
+  const rect = canvas.parentElement.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  const w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
+  canvas.width = w * dpr; canvas.height = h * dpr; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
+  const ctx = canvas.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  const palette = [[234,215,183],[214,191,130],[183,193,138],[143,182,161],[120,149,178],[111,116,132],[68,72,87]];
+  const img = ctx.createImageData(w, h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const zi = Math.min(result.modelSamples - 1, Math.floor(y / h * result.modelSamples));
+    const ti = Math.min(result.modelTraces - 1, Math.floor(x / w * result.modelTraces));
+    const c = palette[result.modelData[zi * result.modelTraces + ti] || 0], i = (y * w + x) * 4;
+    img.data[i] = c[0]; img.data[i+1] = c[1]; img.data[i+2] = c[2]; img.data[i+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  ctx.strokeStyle = "#101828"; ctx.lineWidth = 1.2;
+  for (const hzn of result.horizons) {
+    ctx.beginPath();
+    for (let x = 0; x < w; x++) {
+      const t = Math.min(hzn.line.length - 1, Math.floor(x / w * hzn.line.length));
+      const y = hzn.line[t] / result.modelDepthMax * h;
+      x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+function exportGeologyJson() {
+  if (!geologyResult) return toast("请先生成自动地质模型", "warn");
+  const compact = {
+    ...geologyResult,
+    data: undefined,
+    modelData: Array.from(geologyResult.modelData),
+    horizons: geologyResult.horizons.map(h => ({ ...h, line: Array.from(h.line) }))
+  };
+  download(new Blob([JSON.stringify(compact, null, 2)], { type: "application/json" }), "geologic-model.json");
+}
+
 function exportData(kind) {
   const ds = $("#export-source").value === "output" && store.output ? store.output : store.current;
   if (!ds) return toast("无可导出数据", "warn");
@@ -277,11 +563,13 @@ function exportData(kind) {
     if (kind === "2b") download(write2BFile(ds), `${ds.name || "data"}.2b`);
     else if (kind === "mgp") download(writeMgpJson(store.ipd), `${store.ipd.name}.mgp.json`);
     else if (kind === "depth") download(writeMgpJson({ ...store.ipd, current: ds }), `${store.ipd.name}_depth.json`);
-    else if (["segy","dzt","su"].includes(kind)) download(writeSEGYLike(ds, kind), `${ds.name || "data"}.${kind === "segy" ? "sgy" : kind}`);
-    else if (kind === "png" || kind === "pdf") {
-      const blobCanvas = $("#radar-canvas");
-      blobCanvas.toBlob(b => download(b, `${ds.name || "radar"}.png`));
-    }
+    else if (kind === "segy") download(writeSEGYFile(ds, Number($("#export-dt")?.value || 0.001), Number($("#export-dx")?.value || 0.05)), `${(ds.name || "data").replace(/\.\w+$/i, "")}.sgy`);
+    else if (kind === "dzt") download(writeDZTFile(ds, Number($("#export-dzt-dt")?.value || 0.625), Number($("#export-dx")?.value || 0.05), Number($("#export-range")?.value || ds.numSamples * 0.625)), `${(ds.name || "data").replace(/\.\w+$/i, "")}.dzt`);
+    else if (kind === "su") download(writeSEGYLike(ds, "su"), `${ds.name || "data"}.su`);
+    else if (kind === "csv") download(exportCsv(ds), `${(ds.name || "data").replace(/\.\w+$/i, "")}.csv`);
+    else if (kind === "bin") download(new Blob([ds.data.buffer], { type: "application/octet-stream" }), `${(ds.name || "data").replace(/\.\w+$/i, "")}.bin`);
+    else if (kind === "png") exportPng(ds, `${(ds.name || "radar").replace(/\.\w+$/i, "")}.png`);
+    else if (kind === "pdf") exportPdfDocument(ds, `${(ds.name || "radar").replace(/\.\w+$/i, "")}.pdf`);
     toast("导出完成");
   } catch (e) { toast(e.message, "err"); }
 }
@@ -297,7 +585,24 @@ function bindUi() {
     if (page) switchPage(page);
     if (proc) openProcess(proc);
     if (exp) exportData(exp);
+    if (e.target.dataset.radarMode) setRadarMode(e.target.dataset.radarMode);
+    if (e.target.dataset.popup) toggleFloat(e.target.dataset.popup);
+    if (e.target.dataset.selectionExtract) extractSelections(Number(e.target.dataset.selectionExtract));
+    if (e.target.dataset.selectionZoom) radar.zoomToSelection(radarSelections[Number(e.target.dataset.selectionZoom)]);
+    if (e.target.dataset.selectionRemove) { radarSelections.splice(Number(e.target.dataset.selectionRemove), 1); updateSelectionPanel(); }
+    if (e.target.dataset.annotationRemove) { radarAnnotations.splice(Number(e.target.dataset.annotationRemove), 1); updateAnnotationPanel(); }
     if (action === "open-import") $("#file-input").click();
+    if (action === "zoom-in") radar.zoomIn();
+    if (action === "zoom-out") radar.zoomOut();
+    if (action === "zoom-fit" || action === "radar-reset") radar.zoomFit();
+    if (action === "selection-extract") extractSelections();
+    if (action === "selection-clear") clearSelections();
+    if (action === "selection-export-2b") exportSelection("2b");
+    if (action === "selection-export-pdf") exportSelection("pdf");
+    if (action === "annotation-export") download(new Blob([JSON.stringify(radarAnnotations, null, 2)], { type: "application/json" }), "annotations.json");
+    if (action === "annotation-clear") { radarAnnotations = []; updateAnnotationPanel(); }
+    if (action === "run-geology") runGeologyModel();
+    if (action === "export-geology") exportGeologyJson();
     if (action === "open-trace") openFloat("trace-window");
     if (action === "open-spectrum") openFloat("spectrum-window");
     if (action === "hold-output") store.holdOutput() ? toast("Output Data 已接受为 Current Input Data") : toast("没有 Output Data", "warn");
@@ -327,7 +632,7 @@ function bindUi() {
   $("#spectrum-mean").onclick = () => drawSpectrum(true);
   bindLongPress("[data-trace-step]", btn => moveTrace(Number(btn.dataset.traceStep)));
   bindLongPress("[data-spectrum-step]", btn => { $("#spectrum-index").value = Math.max(0, Number($("#spectrum-index").value) + Number(btn.dataset.spectrumStep)); drawSpectrum(); radar.setCurrentTrace(Number($("#spectrum-index").value)); });
-  makeDraggable($("#trace-window")); makeDraggable($("#spectrum-window"));
+  makeDraggable($("#trace-window")); makeDraggable($("#spectrum-window")); makeDraggable($("#selection-window")); makeDraggable($("#annotation-window")); makeDraggable($("#toolbar-process-window"));
   $("#save-velocity").onclick = () => {
     const p = { v: Number($("#vel-v").value), x0: Number($("#vel-x0").value), z0: Number($("#vel-z0").value) };
     velocityPoints.push(p); updateVelocityList(); toast("速度点已保存");
@@ -346,7 +651,9 @@ function bindLongPress(selector, fn) {
   });
 }
 function makeDraggable(win) {
+  if (!win) return;
   const head = win.querySelector(".float-head");
+  if (!head) return;
   let drag = null;
   head.onmousedown = e => { if (e.target.tagName === "BUTTON") return; const r = win.getBoundingClientRect(); drag = { x:e.clientX-r.left, y:e.clientY-r.top }; };
   addEventListener("mousemove", e => { if (!drag) return; win.style.left = `${e.clientX-drag.x}px`; win.style.top = `${e.clientY-drag.y}px`; });

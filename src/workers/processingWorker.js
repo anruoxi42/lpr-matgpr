@@ -27,8 +27,11 @@ self.onmessage = ({ data }) => {
     else if (op === "time-depth") r = A.timeDepth(d, nt, ns, params.velocity, params.dt, params.dz);
     else if (op === "instantaneous") r = A.instantaneous(d, nt, ns, params.attr);
     else if (op === "centroid") r = A.centroidFrequency(d, nt, ns);
+    else if (op === "geology-model") r = A.geologicModel(d, nt, ns, params);
     else throw new Error("该功能已建立入口，算法将在下一阶段补全。");
-    self.postMessage({ id, ok: true, result: r }, [r.data.buffer]);
+    const transfers = r.data?.buffer ? [r.data.buffer] : [];
+    if (r.modelData?.buffer) transfers.push(r.modelData.buffer);
+    self.postMessage({ id, ok: true, result: r }, transfers);
   } catch (error) {
     self.postMessage({ id, ok: false, error: error.message || String(error) });
   }

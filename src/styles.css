@@ -35,6 +35,8 @@ label input, label select { margin-top:4px; }
 .toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 12px; background:var(--bg2); border-bottom:1px solid var(--bd); }
 .toolbar label { display:flex; align-items:center; gap:6px; margin:0; }
 .toolbar input, .toolbar select { width:95px; padding:5px 7px; }
+.toolbar .sep { width:1px; height:22px; background:var(--bd); display:inline-block; }
+.toolbar button.active, .radar-tool.active { border-color:var(--ac); background:#10203a; color:#fff; }
 .drop-zone { margin:14px; padding:22px; border:2px dashed var(--bd); border-radius:var(--r); background:var(--bg1); text-align:center; color:var(--t2); display:flex; flex-direction:column; gap:6px; }
 .drop-zone.hidden { display:none; }
 .drop-zone.over { border-color:var(--ac); background:#10203a; }
@@ -54,6 +56,13 @@ label input, label select { margin-top:4px; }
 .viewer-controls input { width:80px; }
 .viewer-controls span { color:var(--t2); font-size:11px; overflow:hidden; white-space:nowrap; }
 .float-window canvas { flex:1; width:100%; height:100%; min-height:0; }
+.tool-window { width:560px; height:auto; min-height:260px; max-height:560px; }
+.tool-body { padding:12px; overflow:auto; display:flex; flex-direction:column; gap:10px; }
+.selection-preview-wrap { height:150px; border:1px solid var(--bd); border-radius:var(--r); background:var(--bg0); overflow:hidden; }
+.selection-preview-wrap canvas { width:100%; height:100%; display:block; }
+.selection-row { display:flex; align-items:center; gap:8px; padding:7px 8px; border-bottom:1px solid var(--bd); }
+.selection-row span { color:var(--t2); }
+.selection-row button { padding:3px 7px; font-size:11px; }
 .panel { background:var(--bg1); border:1px solid var(--bd); border-radius:var(--r); padding:16px; overflow:auto; }
 .panel.narrow { width:min(840px, calc(100% - 32px)); margin:16px; }
 .panel h2 { margin:0 0 10px; font-size:18px; }
@@ -62,6 +71,15 @@ label input, label select { margin-top:4px; }
 .canvas-card canvas { width:100%; height:100%; display:block; }
 .button-row, .export-grid { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
 .export-grid button { min-width:150px; }
+.export-options, .geo-controls { display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:8px; margin:12px 0; }
+.geo-canvas-grid { display:grid; grid-template-columns:1fr; gap:14px; margin:14px 0; }
+.geo-canvas-grid h3 { margin:0 0 6px; font-size:13px; color:var(--t1); }
+.geo-canvas-wrap { height:280px; border:1px solid var(--bd); border-radius:var(--r); overflow:hidden; background:var(--bg0); }
+.geo-canvas-wrap canvas { width:100%; height:100%; display:block; }
+.geo-kpis { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+.geo-kpis span { padding:4px 8px; border:1px solid var(--bd); border-radius:6px; background:var(--bg1); color:var(--t1); }
+.mini-table { width:100%; border-collapse:collapse; font-size:12px; }
+.mini-table th, .mini-table td { border-bottom:1px solid var(--bd); padding:6px; text-align:left; vertical-align:top; }
 .slice-wrap { height:320px; border:1px solid var(--bd); border-radius:var(--r); overflow:hidden; background:var(--bg0); margin-top:12px; }
 .slice-wrap canvas { width:100%; height:100%; display:block; }
 dialog { width:460px; background:var(--bg1); border:1px solid var(--bd); border-radius:10px; color:var(--t0); }

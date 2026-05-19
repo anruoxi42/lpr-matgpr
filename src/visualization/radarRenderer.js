@@ -13,11 +13,12 @@ const maps = {
 };
 
 export class RadarRenderer {
-  constructor(canvas, wrap, onCursor) {
+  constructor(canvas, wrap, onCursor, callbacks = {}) {
     this.canvas = canvas;
     this.wrap = wrap;
     this.ctx = canvas.getContext("2d");
     this.onCursor = onCursor;
+    this.callbacks = callbacks;
     this.ampMin = -10;
     this.ampMax = 10;
     this.cmap = "jet";
@@ -26,6 +27,12 @@ export class RadarRenderer {
     this.dataset = null;
     this.drag = null;
     this.markerLine = true;
+    this.mode = "pan";
+    this.selections = [];
+    this.annotations = [];
+    this.measurePoints = [];
+    this.pendingAnnotation = null;
+    this.liveSelection = null;
     new ResizeObserver(() => this.resize()).observe(wrap);
     this.bind();
     this.resize();
@@ -34,6 +41,7 @@ export class RadarRenderer {
     this.dataset = ds;
     this.view = ds ? { t0: 0, t1: ds.numTraces - 1, s0: 0, s1: ds.numSamples - 1 } : null;
     this.currentTrace = 0;
+    this.liveSelection = null;
     this.render();
   }
   setCurrentTrace(t) {
@@ -43,6 +51,39 @@ export class RadarRenderer {
   }
   setAmp(min, max) { this.ampMin = min; this.ampMax = max; this.render(); }
   setColormap(name) { this.cmap = name; this.render(); }
+  setMode(mode = "pan") {
+    this.mode = this.mode === mode ? "pan" : mode;
+    this.pendingAnnotation = null;
+    if (this.mode !== "measure") this.measurePoints = [];
+    this.liveSelection = null;
+    this.render();
+  }
+  setSelections(selections = []) { this.selections = selections; this.render(); }
+  setAnnotations(annotations = []) { this.annotations = annotations; this.render(); }
+  zoomIn() { this.zoom(.5); }
+  zoomOut() { this.zoom(2); }
+  zoom(factor = 1) {
+    if (!this.dataset || !this.view) return;
+    const ct = (this.view.t0 + this.view.t1) / 2, cs = (this.view.s0 + this.view.s1) / 2;
+    const nw = Math.max(12, (this.view.t1 - this.view.t0) * factor);
+    const nh = Math.max(12, (this.view.s1 - this.view.s0) * factor);
+    this.view.t0 = ct - nw / 2; this.view.t1 = ct + nw / 2;
+    this.view.s0 = cs - nh / 2; this.view.s1 = cs + nh / 2;
+    this.clamp(); this.render();
+  }
+  zoomFit() {
+    if (!this.dataset) return;
+    this.view = { t0: 0, t1: this.dataset.numTraces - 1, s0: 0, s1: this.dataset.numSamples - 1 };
+    this.render();
+  }
+  zoomToSelection(sel) {
+    if (!this.dataset || !sel) return;
+    const start = Math.max(0, Math.min(sel.startT, sel.endT));
+    const end = Math.min(this.dataset.numTraces - 1, Math.max(sel.startT, sel.endT));
+    const pad = Math.max(3, Math.round((end - start + 1) * .08));
+    this.view.t0 = start - pad; this.view.t1 = end + pad;
+    this.clamp(); this.render();
+  }
   resize() {
     const r = this.wrap.getBoundingClientRect(), dpr = devicePixelRatio || 1;
     this.canvas.width = Math.max(1, Math.floor(r.width * dpr));
@@ -79,8 +120,43 @@ export class RadarRenderer {
       this.render();
     }, { passive: false });
     this.canvas.addEventListener("mousedown", e => {
-      const r = this.canvas.getBoundingClientRect();
-      this.drag = { x: e.clientX - r.left, y: e.clientY - r.top, view: { ...this.view } };
+      const r = this.canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+      const d = this.dataAt(px, py);
+      if (!this.dataset || !this.view || !d) return;
+      if (this.mode === "measure") {
+        this.measurePoints.push(d);
+        if (this.measurePoints.length > 2) this.measurePoints.shift();
+        if (this.measurePoints.length === 2) this.callbacks.onMeasure?.(this.measurePoints[0], this.measurePoints[1]);
+        this.render();
+        return;
+      }
+      if (this.mode === "select") {
+        this.drag = { type: "select", x: px, y: py, start: d.t };
+        this.liveSelection = { startT: d.t, endT: d.t };
+        this.render();
+        return;
+      }
+      if (this.mode === "ann-point") {
+        this.callbacks.onAnnotation?.({ type: "point", t: d.t, s: d.s, label: `P${this.annotations.length + 1}` });
+        this.render();
+        return;
+      }
+      if (this.mode === "ann-line" || this.mode === "ann-rect") {
+        if (!this.pendingAnnotation) this.pendingAnnotation = d;
+        else {
+          this.callbacks.onAnnotation?.({
+            type: this.mode === "ann-line" ? "line" : "rect",
+            t1: this.pendingAnnotation.t,
+            s1: this.pendingAnnotation.s,
+            t2: d.t,
+            s2: d.s
+          });
+          this.pendingAnnotation = null;
+        }
+        this.render();
+        return;
+      }
+      this.drag = { type: "pan", x: px, y: py, view: { ...this.view } };
     });
     addEventListener("mousemove", e => {
       if (!this.dataset) return;
@@ -92,6 +168,11 @@ export class RadarRenderer {
         this.onCursor?.(d.t, d.s, amp);
       }
       if (!this.drag) { this.render(); return; }
+      if (this.drag.type === "select") {
+        if (d) this.liveSelection = { startT: Math.min(this.drag.start, d.t), endT: Math.max(this.drag.start, d.t) };
+        this.render();
+        return;
+      }
       const p = this.plot(), dv = this.drag.view;
       const dt = (dv.t1 - dv.t0) / p.w, ds = (dv.s1 - dv.s0) / p.h;
       this.view.t0 = dv.t0 - (px - this.drag.x) * dt;
@@ -101,7 +182,14 @@ export class RadarRenderer {
       this.clamp();
       this.render();
     });
-    addEventListener("mouseup", () => { this.drag = null; });
+    addEventListener("mouseup", () => {
+      if (this.drag?.type === "select" && this.liveSelection) {
+        this.callbacks.onSelection?.(this.liveSelection);
+        this.liveSelection = null;
+        this.render();
+      }
+      this.drag = null;
+    });
     this.canvas.addEventListener("mouseleave", () => this.onCursor?.());
   }
   clamp() {
@@ -125,6 +213,9 @@ export class RadarRenderer {
     const p = this.plot();
     this.drawImage(p);
     this.drawAxes(p);
+    this.drawSelections(p);
+    this.drawMeasure(p);
+    this.drawAnnotations(p);
     this.drawTraceLine(p);
     this.drawColorbar(p);
   }
@@ -171,6 +262,76 @@ export class RadarRenderer {
     this.ctx.setLineDash([5, 4]);
     this.ctx.beginPath(); this.ctx.moveTo(x, p.y); this.ctx.lineTo(x, p.y + p.h); this.ctx.stroke();
     this.ctx.setLineDash([]);
+  }
+  drawSelections(p) {
+    if (!this.dataset || !this.view) return;
+    const draw = (sel, strong = false) => {
+      const x1 = p.x + (sel.startT - this.view.t0) / (this.view.t1 - this.view.t0) * p.w;
+      const x2 = p.x + (sel.endT - this.view.t0) / (this.view.t1 - this.view.t0) * p.w;
+      const x = Math.max(p.x, Math.min(x1, x2));
+      const w = Math.min(p.x + p.w, Math.max(x1, x2)) - x;
+      if (w <= 0) return;
+      this.ctx.fillStyle = strong ? "rgba(77,139,255,.20)" : "rgba(77,139,255,.10)";
+      this.ctx.strokeStyle = strong ? "#4d8bff" : "rgba(77,139,255,.62)";
+      this.ctx.lineWidth = strong ? 1.6 : 1;
+      this.ctx.setLineDash(strong ? [] : [4, 3]);
+      this.ctx.fillRect(x, p.y, w, p.h);
+      this.ctx.strokeRect(x, p.y, w, p.h);
+      this.ctx.setLineDash([]);
+    };
+    for (const sel of this.selections) draw(sel, false);
+    if (this.liveSelection) draw(this.liveSelection, true);
+  }
+  drawMeasure(p) {
+    if (!this.measurePoints.length || !this.view) return;
+    const xy = pt => ({
+      x: p.x + (pt.t - this.view.t0) / (this.view.t1 - this.view.t0) * p.w,
+      y: p.y + (pt.s - this.view.s0) / (this.view.s1 - this.view.s0) * p.h
+    });
+    const pts = this.measurePoints.map(xy);
+    this.ctx.fillStyle = "#ffb020";
+    this.ctx.strokeStyle = "#ffb020";
+    this.ctx.lineWidth = 1.8;
+    for (const q of pts) { this.ctx.beginPath(); this.ctx.arc(q.x, q.y, 4, 0, Math.PI * 2); this.ctx.fill(); }
+    if (pts.length === 2) {
+      this.ctx.setLineDash([6, 3]);
+      this.ctx.beginPath(); this.ctx.moveTo(pts[0].x, pts[0].y); this.ctx.lineTo(pts[1].x, pts[1].y); this.ctx.stroke();
+      this.ctx.setLineDash([]);
+      const a = this.measurePoints[0], b = this.measurePoints[1], label = `dT ${Math.abs(b.t - a.t)} / dS ${Math.abs(b.s - a.s)}`;
+      const lx = (pts[0].x + pts[1].x) / 2, ly = (pts[0].y + pts[1].y) / 2;
+      this.ctx.fillStyle = "rgba(8,12,20,.86)";
+      this.ctx.fillRect(lx - 54, ly - 22, 108, 18);
+      this.ctx.fillStyle = "#ffb020";
+      this.ctx.font = "10px Consolas";
+      this.ctx.textAlign = "center";
+      this.ctx.fillText(label, lx, ly - 9);
+    }
+  }
+  drawAnnotations(p) {
+    if (!this.view) return;
+    const xy = (t, s) => ({
+      x: p.x + (t - this.view.t0) / (this.view.t1 - this.view.t0) * p.w,
+      y: p.y + (s - this.view.s0) / (this.view.s1 - this.view.s0) * p.h
+    });
+    const drawAnn = (a, ghost = false) => {
+      this.ctx.globalAlpha = ghost ? .75 : 1;
+      if (a.type === "point") {
+        const q = xy(a.t, a.s);
+        this.ctx.fillStyle = "#f53f3f"; this.ctx.beginPath(); this.ctx.arc(q.x, q.y, 4, 0, Math.PI * 2); this.ctx.fill();
+        this.ctx.fillStyle = "#fff"; this.ctx.font = "10px Segoe UI"; this.ctx.textAlign = "left"; this.ctx.fillText(a.label || "P", q.x + 7, q.y + 3);
+      } else if (a.type === "line") {
+        const a0 = xy(a.t1, a.s1), a1 = xy(a.t2, a.s2);
+        this.ctx.strokeStyle = "#00b42a"; this.ctx.lineWidth = 1.8; this.ctx.beginPath(); this.ctx.moveTo(a0.x, a0.y); this.ctx.lineTo(a1.x, a1.y); this.ctx.stroke();
+      } else if (a.type === "rect") {
+        const a0 = xy(a.t1, a.s1), a1 = xy(a.t2, a.s2);
+        this.ctx.strokeStyle = "#ff7d00"; this.ctx.lineWidth = 1.4; this.ctx.setLineDash([5, 3]);
+        this.ctx.strokeRect(Math.min(a0.x, a1.x), Math.min(a0.y, a1.y), Math.abs(a1.x - a0.x), Math.abs(a1.y - a0.y));
+        this.ctx.setLineDash([]);
+      }
+      this.ctx.globalAlpha = 1;
+    };
+    for (const a of this.annotations) drawAnn(a);
+    if (this.pendingAnnotation) drawAnn({ type: "point", t: this.pendingAnnotation.t, s: this.pendingAnnotation.s, label: "1" }, true);
   }
   drawColorbar(p) {
     const ctx = this.ctx, fn = maps[this.cmap] || maps.jet, x = p.x + p.w + 8, y = p.y + p.h * .2, h = p.h * .6;

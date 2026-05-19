@@ -97,3 +97,88 @@ export function writeSEGYLike(ds, kind = "segy") {
   new Uint8Array(buf).set(new Uint8Array(ds.data.buffer, ds.data.byteOffset, ds.data.byteLength), header.byteLength);
   return new Blob([buf], { type: "application/octet-stream" });
 }
+
+export function writeSEGYFile(ds, dtUs = 0.001, dxM = 0.05) {
+  const nt = ds.numTraces, ns = ds.numSamples;
+  const textHdrSize = 3200, binHdrSize = 400, trcHdrSize = 240, trcDataSize = ns * 4;
+  const buf = new ArrayBuffer(textHdrSize + binHdrSize + nt * (trcHdrSize + trcDataSize));
+  const v = new DataView(buf);
+  const lines = [
+    "C 1 SEG-Y REV1 exported from LPR matGPR                         ",
+    "C 2 Source: CE-3 Lunar Penetrating Radar                         ",
+    "C 3 Data format: IEEE 32-bit float, format code 5                ",
+    `C 4 Traces: ${String(nt).padEnd(56, " ")}`,
+    `C 5 Samples/trace: ${String(ns).padEnd(48, " ")}`,
+    `C 6 Sample interval (us): ${String(dtUs).padEnd(39, " ")}`,
+    `C 7 Trace spacing (m): ${String(dxM).padEnd(42, " ")}`
+  ];
+  for (let i = lines.length; i < 40; i++) lines.push(`C ${String(i + 1).padEnd(75, " ")}`);
+  lines[39] = "C 40 END                                                         ";
+  const text = lines.join("").padEnd(textHdrSize, " ").slice(0, textHdrSize);
+  for (let i = 0; i < textHdrSize; i++) v.setUint8(i, text.charCodeAt(i) & 0xff);
+
+  let off = textHdrSize;
+  v.setInt32(off, 0, false); off += 4;
+  v.setInt32(off, 0, false); off += 4;
+  v.setInt32(off, 1, false); off += 4;
+  v.setInt16(off, 1, false); off += 2;
+  v.setInt16(off, 0, false); off += 2;
+  const dtField = Math.max(1, Math.round(dtUs));
+  v.setInt16(off, dtField, false); off += 2;
+  v.setInt16(off, dtField, false); off += 2;
+  v.setInt16(off, ns, false); off += 2;
+  v.setInt16(off, ns, false); off += 2;
+  v.setInt16(off, 5, false); off += 2;
+  v.setInt16(off, 1, false); off += 2;
+  v.setInt16(off, 1, false); off += 2;
+  while (off < textHdrSize + binHdrSize) v.setUint8(off++, 0);
+
+  off = textHdrSize + binHdrSize;
+  for (let t = 0; t < nt; t++) {
+    const traceStart = off;
+    v.setInt32(off, t + 1, false); off += 4;
+    v.setInt32(off, t + 1, false); off += 4;
+    v.setInt32(off, 1, false); off += 4;
+    v.setInt32(off, t + 1, false); off += 4;
+    v.setInt32(off, 0, false); off += 4;
+    v.setInt32(off, 0, false); off += 4;
+    v.setInt32(off, 1, false); off += 4;
+    v.setInt16(off, 1, false); off += 2;
+    while (off < traceStart + 114) v.setUint8(off++, 0);
+    v.setInt16(off, ns, false); off += 2;
+    v.setInt16(off, dtField, false); off += 2;
+    while (off < traceStart + trcHdrSize) v.setUint8(off++, 0);
+    for (let s = 0; s < ns; s++) {
+      v.setFloat32(off, ds.data[t * ns + s], false);
+      off += 4;
+    }
+  }
+  return new Blob([buf], { type: "application/octet-stream" });
+}
+
+export function writeDZTFile(ds, dtNs = 0.625, dxM = 0.05, rangeNs = ds.numSamples * dtNs) {
+  const nt = ds.numTraces, ns = ds.numSamples;
+  const hdrSize = 1024, trcDataSize = ns * 4;
+  const buf = new ArrayBuffer(hdrSize + nt * trcDataSize);
+  const v = new DataView(buf);
+  v.setUint16(0, 0x00ff, true);
+  v.setUint16(2, hdrSize / 4, true);
+  v.setUint16(4, ns, true);
+  v.setUint16(6, 32, true);
+  v.setUint16(8, 0, true);
+  v.setFloat32(10, 1000 / Math.max(dtNs, 1e-9), true);
+  v.setFloat32(14, dxM, true);
+  v.setFloat32(26, rangeNs, true);
+  v.setFloat32(68, rangeNs, true);
+  v.setUint8(99, 1);
+  const nameBytes = new TextEncoder().encode(ds.name || "LPR Export");
+  for (let i = 0; i < Math.min(nameBytes.length, 256); i++) v.setUint8(128 + i, nameBytes[i]);
+  let off = hdrSize;
+  for (let t = 0; t < nt; t++) {
+    for (let s = 0; s < ns; s++) {
+      v.setFloat32(off, ds.data[t * ns + s], true);
+      off += 4;
+    }
+  }
+  return new Blob([buf], { type: "application/octet-stream" });
+}

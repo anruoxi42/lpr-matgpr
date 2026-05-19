@@ -119,6 +119,22 @@
       <section id="page-radar" class="page active">
         <div class="toolbar">
           <input id="file-input" type="file" accept=".2b,.2B" multiple hidden>
+          <button data-action="zoom-in" title="放大">Zoom +</button>
+          <button data-action="zoom-out" title="缩小">Zoom -</button>
+          <button data-action="zoom-fit" title="全图">Fit</button>
+          <span class="sep"></span>
+          <button class="radar-tool" data-radar-mode="measure">测量</button>
+          <button class="radar-tool" data-radar-mode="select">选区</button>
+          <button data-popup="selection-window">提取</button>
+          <span class="sep"></span>
+          <button class="radar-tool" data-radar-mode="ann-point">点</button>
+          <button class="radar-tool" data-radar-mode="ann-line">线</button>
+          <button class="radar-tool" data-radar-mode="ann-rect">框</button>
+          <button data-popup="annotation-window">标注</button>
+          <span class="sep"></span>
+          <button data-action="radar-reset">重置</button>
+          <button data-action="open-trace">波形</button>
+          <button data-popup="toolbar-process-window">处理</button>
           <button class="primary" data-action="open-import">导入 .2B</button>
           <button data-action="open-trace">道查看器</button>
           <button data-action="open-spectrum">频谱查看器</button>
@@ -149,6 +165,43 @@
         <div id="radar-wrap" class="radar-wrap">
           <canvas id="radar-canvas"></canvas>
         </div>
+        <div id="selection-window" class="float-window tool-window">
+          <div class="float-head"><span>选区与数据提取</span><button data-close="selection-window">x</button></div>
+          <div class="tool-body">
+            <div id="selection-summary" class="muted"></div>
+            <div id="selection-list" class="list muted">使用“选区”工具在雷达剖面中拖拽。</div>
+            <div class="selection-preview-wrap"><canvas id="selection-preview"></canvas></div>
+            <div class="button-row">
+              <button id="btn-selection-extract" data-action="selection-extract" disabled>合并提取</button>
+              <button id="btn-selection-2b" data-action="selection-export-2b" disabled>导出 .2B</button>
+              <button id="btn-selection-pdf" data-action="selection-export-pdf" disabled>导出 PDF</button>
+              <button data-action="selection-clear">清空全部</button>
+            </div>
+          </div>
+        </div>
+        <div id="annotation-window" class="float-window tool-window">
+          <div class="float-head"><span>标注列表</span><button data-close="annotation-window">x</button></div>
+          <div class="tool-body">
+            <div id="annotation-list" class="list muted">暂无标注。</div>
+            <div class="button-row">
+              <button data-action="annotation-export">导出标注</button>
+              <button data-action="annotation-clear">清空</button>
+            </div>
+          </div>
+        </div>
+        <div id="toolbar-process-window" class="float-window tool-window">
+          <div class="float-head"><span>常用处理与自动建模</span><button data-close="toolbar-process-window">x</button></div>
+          <div class="tool-body">
+            <div class="button-row">
+              <button data-process="remove-dc">Remove DC</button>
+              <button data-process="global-bg">Remove Background</button>
+              <button data-process="gagc">Gaussian AGC</button>
+              <button data-process="fir-frequency">Bandpass</button>
+              <button data-action="run-geology" class="primary">自动地质建模</button>
+            </div>
+            <p class="muted">处理结果进入 Output Data，可检查后 Hold。</p>
+          </div>
+        </div>
       </section>
 
       <section id="page-export" class="page">
@@ -161,6 +214,19 @@
               <option value="output">Output Data</option>
             </select>
           </label>
+          <div class="export-options">
+            <label>SEG-Y dt (us)<input id="export-dt" type="number" value="0.001" step="0.0001"></label>
+            <label>DZT dt (ns)<input id="export-dzt-dt" type="number" value="0.625" step="0.001"></label>
+            <label>dx (m)<input id="export-dx" type="number" value="0.05" step="0.01"></label>
+            <label>Range (ns)<input id="export-range" type="number" value="1280" step="1"></label>
+            <label>Image cmap
+              <select id="export-cmap">
+                <option value="gray">Gray</option>
+                <option value="jet">Jet</option>
+                <option value="seismic">Seismic</option>
+              </select>
+            </label>
+          </div>
           <div class="export-grid">
             <button data-export="2b">导出 .2B</button>
             <button data-export="mgp">Save MGP/MAT JSON</button>
@@ -168,6 +234,8 @@
             <button data-export="segy">SEG-Y Rev 1</button>
             <button data-export="dzt">DZT</button>
             <button data-export="su">SU</button>
+            <button data-export="csv">CSV</button>
+            <button data-export="bin">Float32 BIN</button>
             <button data-export="png">PNG</button>
             <button data-export="pdf">PDF</button>
           </div>
@@ -220,6 +288,31 @@
           <button data-action="open-trace">打开道查看器</button>
           <button data-action="show-attenuation">计算衰减特征</button>
           <button data-action="save-report">导出解释报告 JSON</button>
+          <div class="geo-controls">
+            <label>velocity m/ns<input id="geo-velocity" type="number" value="0.10" step="0.01"></label>
+            <label>dt ns<input id="geo-dt" type="number" value="0.3125" step="0.0001"></label>
+            <label>dx m<input id="geo-dx" type="number" value="0.05" step="0.01"></label>
+            <label>low MHz<input id="geo-lo" type="number" value="20" step="1"></label>
+            <label>high MHz<input id="geo-hi" type="number" value="900" step="10"></label>
+            <label>background traces<input id="geo-bg" type="number" value="25" step="2"></label>
+            <label>AGC samples<input id="geo-agc" type="number" value="80" step="5"></label>
+            <label>model depth m<input id="geo-depth" type="number" value="24" step="1"></label>
+          </div>
+          <div class="button-row">
+            <button class="primary" data-action="run-geology">自动提取界面并生成地质模型</button>
+            <button data-action="export-geology">导出地质模型 JSON</button>
+          </div>
+          <div class="geo-canvas-grid">
+            <div>
+              <h3>处理后雷达剖面与自动界面</h3>
+              <div class="geo-canvas-wrap"><canvas id="geo-radar-canvas"></canvas></div>
+            </div>
+            <div>
+              <h3>地质建模模型</h3>
+              <div class="geo-canvas-wrap"><canvas id="geo-model-canvas"></canvas></div>
+            </div>
+          </div>
+          <div id="geo-report" class="list muted">尚未生成自动地质模型。</div>
           <div id="interpret-output" class="list muted">解释结果将在这里显示。</div>
         </div>
       </section>
