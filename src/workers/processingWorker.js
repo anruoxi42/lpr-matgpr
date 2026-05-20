@@ -25,10 +25,19 @@ function withUpdatedMeta(result, dataset, params = {}) {
   meta.dtNs = dtNs;
   meta.dxM = dxM;
   meta.sampleRateHz = 1 / (dtNs * 1e-9);
-  meta.timeAxisNs = buildAxis(result.numSamples, dtNs, sampleStart * axes.dtNs);
-  meta.tt2w = meta.timeAxisNs;
+  if (result.verticalAxisKind === "depth" || result.depthAxisM || result.depthStep) {
+    meta.verticalAxisKind = "depth";
+    meta.depthStep = result.depthStep;
+    meta.depthAxisM = result.depthAxisM || buildAxis(result.numSamples, result.depthStep || 1);
+  } else {
+    meta.verticalAxisKind = "time";
+    meta.timeAxisNs = buildAxis(result.numSamples, dtNs, sampleStart * axes.dtNs);
+    meta.tt2w = meta.timeAxisNs;
+  }
   meta.distanceAxisM = buildAxis(result.numTraces, dxM);
   meta.x = meta.distanceAxisM;
+  if (result.vofh || params.vofh) meta.vofh = result.vofh || params.vofh;
+  if (result.badTraces) meta.badTraces = result.badTraces;
   return { ...result, meta, dtNs, dxM };
 }
 
@@ -42,7 +51,7 @@ self.onmessage = ({ data }) => {
     if (op === "remove-dc") r = A.removeDC(d, nt, ns);
     else if (op === "trim-time") r = A.trimTime(d, nt, ns, params.start, params.end);
     else if (op === "signal-position") r = A.signalPosition(d, nt, ns, params.shift);
-    else if (op === "bad-traces") r = A.removeBadTraces(d, nt, ns, params.ranges);
+    else if (op === "bad-traces") r = A.removeBadTraces(d, nt, ns, params.ranges, { x: dataset.meta?.x || dataset.meta?.distanceAxisM });
     else if (op === "dewow") r = A.dewow(d, nt, ns);
     else if (op === "equalize") r = A.equalize(d, nt, ns);
     else if (op === "resample-time") r = A.resample(d, nt, ns, "time", params.samples, { ...params, dtNs: axes.dtNs });
@@ -57,9 +66,15 @@ self.onmessage = ({ data }) => {
     else if (op === "fir-frequency") r = A.freqFilter(d, nt, ns, params.type, (params.lo ?? 20) * 1e6, (params.hi ?? 200) * 1e6, { dtNs: axes.dtNs });
     else if (op === "fir-wavenumber") r = A.kFilter(d, nt, ns, params.type, params.loK ?? params.lo ?? 0.2, params.hiK ?? params.hi ?? 5, axes.dxM);
     else if (op === "fk-filter") r = A.fkFilter(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
-    else if (op === "kl-filter") r = A.slidingBackground(d, nt, ns, params.width || 9, "retain");
-    else if (op === "stolt" || op === "gazdag" || op === "pspi" || op === "split-step") r = A.simpleMigration(d, nt, ns, params.velocity, params.dt, params.dx);
-    else if (op === "time-depth") r = A.timeDepth(d, nt, ns, params.velocity, params.dt, params.dz);
+    else if (op === "kl-filter") r = A.karhunenLoeveFilter(d, nt, ns, params);
+    else if (op === "fx-decon") r = A.fxDecon(d, nt, ns, { ...params, dtNs: axes.dtNs });
+    else if (op === "sparse-decon") r = A.sparseDecon(d, nt, ns, { ...params, dtNs: axes.dtNs });
+    else if (op === "attenuation-analysis") r = A.attenuationAnalysis(d, nt, ns, { ...params, dtNs: axes.dtNs });
+    else if (op === "stolt") r = A.stoltMigration(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
+    else if (op === "gazdag") r = A.gazdagMigration(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
+    else if (op === "split-step") r = A.splitStepMigration(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
+    else if (op === "pspi") r = A.simpleMigration(d, nt, ns, params.velocity, params.dt, params.dx);
+    else if (op === "time-depth") r = A.timeDepth(d, nt, ns, { ...params, dtNs: axes.dtNs });
     else if (op === "instantaneous") r = A.instantaneous(d, nt, ns, { ...params, dtNs: axes.dtNs });
     else if (op === "centroid") r = A.centroidFrequency(d, nt, ns);
     else if (op === "geology-model") r = A.geologicModel(d, nt, ns, params);

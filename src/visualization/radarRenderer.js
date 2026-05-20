@@ -28,6 +28,8 @@ export class RadarRenderer {
     this.drag = null;
     this.markerLine = true;
     this.mode = "pan";
+    this.verticalAxisMode = "sample";
+    this.depthAxis = null;
     this.selections = [];
     this.annotations = [];
     this.measurePoints = [];
@@ -51,6 +53,20 @@ export class RadarRenderer {
   }
   setAmp(min, max) { this.ampMin = min; this.ampMax = max; this.render(); }
   setColormap(name) { this.cmap = name; this.render(); }
+  setVerticalAxisMode(mode = "sample", depthAxis = null) {
+    this.verticalAxisMode = mode === "depth" ? "depth" : "sample";
+    this.depthAxis = depthAxis;
+    this.render();
+  }
+  verticalReadout(sample) {
+    if (this.verticalAxisMode !== "depth") return { label: "样点", value: sample, text: `样点 ${sample}` };
+    const axis = this.depthAxis || this.dataset?.depthAxisM || this.dataset?.meta?.depthAxisM;
+    const step = this.dataset?.depthStep || this.dataset?.meta?.depthStep;
+    let value = Number(axis?.[sample]);
+    if (!Number.isFinite(value) && Number.isFinite(step)) value = sample * step;
+    if (!Number.isFinite(value)) return { label: "样点", value: sample, text: `样点 ${sample}` };
+    return { label: "深度", value, text: `深度 ${value.toFixed(3)} m` };
+  }
   setMode(mode = "pan") {
     this.mode = this.mode === mode ? "pan" : mode;
     this.pendingAnnotation = null;
@@ -249,10 +265,11 @@ export class RadarRenderer {
     ctx.textAlign = "right";
     for (let i = 0; i <= 6; i++) {
       const f = i / 6, y = p.y + f * p.h, s = Math.round(this.view.s0 + f * (this.view.s1 - this.view.s0));
-      ctx.fillText(s, p.x - 7, y + 3);
+      const readout = this.verticalReadout(s);
+      ctx.fillText(readout.label === "深度" ? readout.value.toFixed(2) : s, p.x - 7, y + 3);
     }
     ctx.textAlign = "center"; ctx.fillText("道号", p.x + p.w / 2, p.y + p.h + 31);
-    ctx.save(); ctx.translate(15, p.y + p.h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("采样点 / 时间", 0, 0); ctx.restore();
+    ctx.save(); ctx.translate(15, p.y + p.h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(this.verticalAxisMode === "depth" ? "深度 (m)" : "采样点 / 时间", 0, 0); ctx.restore();
   }
   drawTraceLine(p) {
     if (!this.markerLine || !this.dataset) return;

@@ -1,15 +1,24 @@
 import {
   agc,
+  attenuationAnalysis,
   amplitudeGain,
   dewow,
+  fxDecon,
   fkFilter,
   freqFilter,
   gagc,
   kFilter,
+  karhunenLoeveFilter,
   powerGain,
+  removeBadTraces,
   resample,
+  sparseDecon,
   slidingBackground,
-  spectrum
+  spectrum,
+  splitStepMigration,
+  stoltMigration,
+  gazdagMigration,
+  timeDepth
 } from "../src/processing/algorithms.js";
 
 function assert(condition, message) {
@@ -85,6 +94,13 @@ finite(bgRemove.data, "sliding background remove");
 finite(bgRetain.data, "sliding background retain");
 assert(bgRemove.numTraces === nt && bgRetain.numSamples === ns, "sliding background dimensions are wrong");
 
+const badSource = new Float32Array(data);
+for (let s = 0; s < ns; s++) badSource[10 * ns + s] = 999;
+const badFixed = removeBadTraces(badSource, nt, ns, "10", { x: Array.from({ length: nt }, (_, i) => i) });
+finite(badFixed.data, "bad trace interpolation");
+assert(badFixed.numTraces === nt && badFixed.numSamples === ns, "bad trace replacement must preserve dimensions");
+assert(Math.abs(badFixed.data[10 * ns + 20] - 999) > 100, "bad trace was not interpolated");
+
 const band = freqFilter(data, nt, ns, "bp", 40e6, 350e6, { dtNs });
 const wk = kFilter(data, nt, ns, "bp", 0.2, 6, dxM);
 finite(band.data, "frequency FIR");
@@ -107,5 +123,53 @@ for (let i = 0; i < data.length; i++) {
   signalEnergy += data[i] ** 2;
 }
 assert(Math.sqrt(complementError / signalEnergy) < 1e-5, "F-K polygon pass/stop are not complementary");
+
+const tdUniform = timeDepth(data, nt, ns, { dtNs, vofh: "0.1,0", dzM: 0.05 });
+finite(tdUniform.data, "uniform time-depth");
+assert(tdUniform.verticalAxisKind === "depth" && tdUniform.depthAxisM.length === tdUniform.numSamples, "time-depth did not return a depth axis");
+assert(Math.abs(tdUniform.data[0] - data[0]) < 1e-6, "uniform time-depth should preserve the first sample");
+
+const tdLayered = timeDepth(data, nt, ns, { dtNs, vofh: "0.11,1\n0.08,2\n0.14,0", dzM: 0.04 });
+finite(tdLayered.data, "layered time-depth");
+for (let i = 1; i < tdLayered.depthAxisM.length; i++) assert(tdLayered.depthAxisM[i] > tdLayered.depthAxisM[i - 1], "layered depth axis must be monotonic");
+
+const smallNt = 18, smallNs = 48, small = synthetic(smallNt, smallNs);
+const smallParams = { dtNs, dxM, vofh: "0.1,0" };
+const stolt = stoltMigration(small, smallNt, smallNs, smallParams);
+const gazdag = gazdagMigration(small, smallNt, smallNs, smallParams);
+const split = splitStepMigration(small, smallNt, smallNs, { ...smallParams, dzM: 0.05, zMaxM: 1.2 });
+for (const [label, result] of [["stolt", stolt], ["gazdag", gazdag], ["split-step", split]]) {
+  finite(result.data, label);
+  assert(result.numTraces === smallNt, `${label} changed trace count`);
+  assert(result.numSamples > 0, `${label} has no samples`);
+}
+assert(stolt.numSamples === smallNs && gazdag.numSamples === smallNs, "1-D migrations should preserve sample count");
+assert(split.verticalAxisKind === "depth" && split.depthAxisM.length === split.numSamples, "split-step should produce a depth axis");
+
+const klModel = karhunenLoeveFilter(small, smallNt, smallNs, { components: 3, output: "model" });
+const klResidual = karhunenLoeveFilter(small, smallNt, smallNs, { components: 3, output: "residual" });
+finite(klModel.data, "K-L model");
+finite(klResidual.data, "K-L residual");
+let klError = 0, klEnergy = 0;
+for (let i = 0; i < small.length; i++) {
+  klError += (klModel.data[i] + klResidual.data[i] - small[i]) ** 2;
+  klEnergy += small[i] ** 2;
+}
+assert(Math.sqrt(klError / Math.max(1e-12, klEnergy)) < 1e-5, "K-L model + residual should reconstruct input");
+
+const fx = fxDecon(small, smallNt, smallNs, { dtNs, operatorLength: 4, muPercent: 1, flowMHz: 20, fhighMHz: 500 });
+finite(fx.data, "F-X deconvolution");
+assert(fx.numTraces === smallNt && fx.numSamples === smallNs, "F-X decon dimensions are wrong");
+
+const sparse = sparseDecon(small, smallNt, smallNs, { dtNs, frequencyMHz: 100, lengthSamples: 21, mu: 0.01, iterations: 3 });
+finite(sparse.data, "sparse deconvolution");
+finite(sparse.predicted, "sparse decon predicted");
+assert(sparse.numTraces === smallNt && sparse.numSamples === smallNs, "sparse decon dimensions are wrong");
+
+const attenuation = attenuationAnalysis(data, nt, ns, { dtNs });
+finite(attenuation.data, "attenuation analysis");
+assert(attenuation.numTraces === 4 && attenuation.numSamples === ns, "attenuation analysis should return four curves");
+assert(Number.isFinite(attenuation.powerLaw[0]) && Number.isFinite(attenuation.powerLaw[1]), "invalid power-law fit");
+assert(Number.isFinite(attenuation.exponential[0]) && Number.isFinite(attenuation.exponential[1]), "invalid exponential fit");
 
 console.log("MATGPR algorithm verification passed");

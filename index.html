@@ -36,7 +36,7 @@
         <div class="menu">
           <button data-process="signal-position">调整信号位置</button>
           <button data-process="trim-time">定时窗口</button>
-          <button data-process="bad-traces">删除不良痕迹</button>
+          <button data-process="bad-traces">不良道插值替换</button>
           <button data-process="remove-dc">去均值 Remove DC</button>
           <button data-process="dewow">去低频 Dewow</button>
           <button data-process="dzt-gain">Remove DZT header gain</button>
@@ -65,6 +65,8 @@
           <button data-process="fir-wavenumber">FIR Wavenumber Filter</button>
           <button data-process="fk-filter">F-K Filter</button>
           <button data-process="kl-filter">Karhunen-Loeve Filter</button>
+          <button data-process="fx-decon">F-X Deconvolution</button>
+          <button data-process="sparse-decon">Sparse Deconvolution</button>
           <button data-process="advanced-placeholder">Curvelet / Wavelet / Tau-P / F-X</button>
         </div>
       </div>
@@ -134,6 +136,7 @@
           <button data-popup="annotation-window">标注</button>
           <span class="sep"></span>
           <button data-action="radar-reset">重置</button>
+          <button id="depth-axis-toggle" data-action="toggle-depth-axis">深度轴</button>
           <button data-action="open-trace">波形</button>
           <button data-popup="toolbar-process-window">处理</button>
           <button class="primary" data-action="open-import">导入 .2B</button>

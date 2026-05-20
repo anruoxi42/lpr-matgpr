@@ -1,6 +1,6 @@
 import { RECORD_SIZE, SAMPLES_PER_TRACE, parse2BFile, write2BFile, writeMgpJson, writeSEGYLike, writeSEGYFile, writeDZTFile } from "./io/twoB.js";
 import { IpdStore } from "./processing/ipdStore.js";
-import { spectrum, fkSpectrum } from "./processing/algorithms.js";
+import { depthAxisFromVofh, spectrum, fkSpectrum } from "./processing/algorithms.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
 
 const store = new IpdStore();
@@ -19,11 +19,14 @@ let dataManagerSelection = new Set();
 let velocityRenderer = null;
 let velocityPreviewPoint = null;
 let velocityFixedPoint = null;
+let depthAxisEnabled = false;
+let currentVofhText = "0.1,0";
 
 const $ = sel => document.querySelector(sel);
 const $$ = sel => [...document.querySelectorAll(sel)];
 const radar = new RadarRenderer($("#radar-canvas"), $("#radar-wrap"), (t, s, amp) => {
-  $("#cursor-status").textContent = t == null ? "" : `道 ${t} · 样点 ${s} · 振幅 ${amp.toFixed(5)}`;
+  const y = t == null ? null : radar.verticalReadout(s).text;
+  $("#cursor-status").textContent = t == null ? "" : `道 ${t} · ${y} · 振幅 ${amp.toFixed(5)}`;
   if (t != null) syncTraceIndex(t, false);
 });
 
@@ -83,6 +86,7 @@ function refresh() {
   $("#dataset-title").textContent = store.ipd ? `${store.ipd.name} · ${displaySource === "output" && store.output ? "Output Data" : "Current Input Data"}` : "未加载数据";
   $("#drop-zone").classList.toggle("hidden", !!store.current);
   radar.setDataset(ds);
+  applyDepthAxisMode();
   $("#state-panel").innerHTML = store.ipd ? [
     row("Current", `${store.current.numTraces} 道 × ${store.current.numSamples} 样点`),
     row("Output", store.output ? `${store.output.numTraces} 道 × ${store.output.numSamples} 样点，待验收` : "无"),
@@ -97,6 +101,30 @@ function refresh() {
 }
 function row(k, v) { return `<div><span class="muted">${k}</span><br><b>${v}</b></div>`; }
 store.addEventListener("change", refresh);
+
+function formatVofh(vofh) {
+  return Array.isArray(vofh) ? vofh.map(row => `${row[0]},${row[1] ?? 0}`).join("\n") : (typeof vofh === "string" ? vofh : "");
+}
+
+function fallbackDepthAxis(ds) {
+  if (!ds) return null;
+  const axis = ds.depthAxisM || ds.meta?.depthAxisM;
+  if (axis?.length) return axis;
+  const step = ds.depthStep || ds.meta?.depthStep;
+  if (Number.isFinite(step) && step > 0) {
+    const out = new Float32Array(ds.numSamples);
+    for (let i = 0; i < out.length; i++) out[i] = i * step;
+    return out;
+  }
+  const dtNs = ds.meta?.dtNs || ds.dtNs || 0.625;
+  return depthAxisFromVofh(ds.numSamples, dtNs, currentVofhText || ds.meta?.vofh || "0.1,0");
+}
+
+function applyDepthAxisMode() {
+  const ds = currentDisplayed();
+  radar.setVerticalAxisMode(depthAxisEnabled ? "depth" : "sample", depthAxisEnabled ? fallbackDepthAxis(ds) : null);
+  $("#depth-axis-toggle")?.classList.toggle("active", depthAxisEnabled);
+}
 
 async function importFiles(files) {
   for (const file of files) {
@@ -118,7 +146,7 @@ async function importFiles(files) {
 const processDefs = {
   "signal-position": ["调整信号位置", [{ id: "shift", label: "裁剪零点前样点数", value: 0 }]],
   "trim-time": ["定时窗口", [{ id: "start", label: "起始样点", value: 0 }, { id: "end", label: "结束样点", value: 1023 }]],
-  "bad-traces": ["删除不良痕迹", [{ id: "ranges", label: "坏道范围，例如 5-9,22", value: "" }]],
+  "bad-traces": ["不良道插值替换", [{ id: "ranges", label: "坏道范围，例如 5-9,22", value: "" }]],
   "remove-dc": ["去均值 Remove DC", []],
   "dewow": ["去低频 Dewow", []],
   "dzt-gain": ["Remove DZT header gain", []],
@@ -136,14 +164,17 @@ const processDefs = {
   "fir-frequency": ["FIR Frequency Filter", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "lo", label: "低频 MHz", value: 20 }, { id: "hi", label: "高频 MHz", value: 200 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
   "fir-wavenumber": ["FIR Wavenumber Filter", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "loK", label: "低波数 m^-1", value: 0.2 }, { id: "hiK", label: "高波数 m^-1", value: 5 }, { id: "dxM", label: "dx (m)", value: 0.05 }]],
   "fk-filter": ["F-K Filter", []],
-  "kl-filter": ["Karhunen-Loeve Filter", [{ id: "width", label: "主成分近似窗口", value: 9 }]],
+  "kl-filter": ["Karhunen-Loeve Filter", [{ id: "components", label: "主成分个数 P", value: 9 }, { id: "output", label: "输出 model/residual", value: "model" }]],
+  "fx-decon": ["F-X Deconvolution", [{ id: "operatorLength", label: "预测算子长度", value: 8 }, { id: "muPercent", label: "预白化 (%)", value: 1 }, { id: "flowMHz", label: "低频 MHz", value: 20 }, { id: "fhighMHz", label: "高频 MHz", value: 600 }]],
+  "sparse-decon": ["Sparse Deconvolution", [{ id: "frequencyMHz", label: "Ricker 主频 MHz", value: 100 }, { id: "lengthSamples", label: "子波长度样点", value: 64 }, { id: "mu", label: "L1 正则 mu", value: 0.01 }, { id: "iterations", label: "IRLS 迭代", value: 10 }, { id: "output", label: "输出 reflectivity/predicted", value: "reflectivity" }]],
+  "attenuation-analysis": ["Attenuation Analysis", []],
   "advanced-placeholder": ["Curvelet / Wavelet / Tau-P / F-X", []],
   instantaneous: ["瞬时属性", [{ id: "attr", label: "属性 amplitude/atan/atan2/unwrapped/ifreq", value: "amplitude" }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
-  stolt: ["1-D F-K / Stolt Migration", [{ id: "velocity", label: "速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }]],
-  gazdag: ["1-D Phase-shift / Gazdag", [{ id: "velocity", label: "速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }]],
-  "time-depth": ["Time-to-Depth Conversion", [{ id: "velocity", label: "速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dz", label: "深度采样 m", value: .02 }]],
+  stolt: ["1-D F-K / Stolt Migration", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
+  gazdag: ["1-D Phase-shift / Gazdag", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
+  "time-depth": ["Time-to-Depth Conversion", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dzM", label: "深度采样 m", value: .02 }]],
   pspi: ["2-D PSPI Migration", [{ id: "velocity", label: "参考速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }]],
-  "split-step": ["2-D Split-step Fourier", [{ id: "velocity", label: "参考速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }]]
+  "split-step": ["2-D Split-step Fourier", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }, { id: "dzM", label: "深度步长 m", value: .02 }, { id: "zMaxM", label: "最大深度 m (可空)", value: "" }, { id: "fMaxGHz", label: "最高频率 GHz (可空)", value: "" }, { id: "q", label: "Q (可空)", value: "" }, { id: "antennaFreqMHz", label: "天线频率 MHz (可空)", value: "" }]]
 };
 
 function openProcess(op) {
@@ -152,6 +183,7 @@ function openProcess(op) {
   const [title, fields] = processDefs[op] || [op, []];
   const fieldValue = f => {
     const ds = store.current;
+    if (f.id === "vofh") return formatVofh(ds.meta?.vofh) || currentVofhText || f.value;
     if (f.id === "dtNs") return ds.meta?.dtNs || ds.dtNs || f.value;
     if (f.id === "dxM") return ds.meta?.dxM || ds.dxM || f.value;
     if (f.id === "samples") return ds.numSamples;
@@ -159,13 +191,22 @@ function openProcess(op) {
     if (f.id === "end") return ds.numSamples - 1;
     return f.value;
   };
+  const fieldHtml = f => {
+    const value = fieldValue(f);
+    if (f.type === "textarea") return `<label>${f.label}<textarea data-field="${f.id}" rows="4">${value}</textarea></label>`;
+    return `<label>${f.label}<input data-field="${f.id}" value="${value}"></label>`;
+  };
   $("#process-title").textContent = title;
-  $("#process-fields").innerHTML = fields.length ? fields.map(f => `<label>${f.label}<input data-field="${f.id}" value="${fieldValue(f)}"></label>`).join("") : `<p class="muted">无需额外参数。执行后生成 Output Data，需要 Hold 才会成为 Current Input Data。</p>`;
+  $("#process-fields").innerHTML = fields.length ? fields.map(fieldHtml).join("") : `<p class="muted">无需额外参数。执行后生成 Output Data，需要 Hold 才会成为 Current Input Data。</p>`;
   $("#run-process").onclick = async ev => {
     ev.preventDefault();
     try {
       const params = {};
-      $$("[data-field]").forEach(i => params[i.dataset.field] = isNaN(Number(i.value)) || ["type", "ranges", "curve", "attr", "power"].includes(i.dataset.field) ? i.value : Number(i.value));
+      $$("[data-field]").forEach(i => {
+        const key = i.dataset.field;
+        params[key] = isNaN(Number(i.value)) || ["type", "ranges", "curve", "attr", "power", "output", "vofh"].includes(key) ? i.value : Number(i.value);
+      });
+      if (params.vofh) currentVofhText = params.vofh;
       $("#process-dialog").close();
       $("#footer-status").textContent = `正在执行 ${title}`;
       if (op === "dzt-gain" || op === "advanced-placeholder") return toast("该功能入口已新增，算法将在下一阶段接入。", "warn");
@@ -978,6 +1019,7 @@ function bindUi() {
     if (action === "zoom-in") radar.zoomIn();
     if (action === "zoom-out") radar.zoomOut();
     if (action === "zoom-fit" || action === "radar-reset") radar.zoomFit();
+    if (action === "toggle-depth-axis") { depthAxisEnabled = !depthAxisEnabled; applyDepthAxisMode(); toast(depthAxisEnabled ? "纵轴已切换为深度" : "纵轴已恢复为采样点/时间"); }
     if (action === "selection-extract") extractSelections();
     if (action === "selection-clear") clearSelections();
     if (action === "selection-export-2b") exportSelection("2b");
@@ -1055,12 +1097,22 @@ async function computeSpecial(op, name) {
   store.setOutput({ ...result, name }, { name, op, params:{} });
   displaySource = "output"; $("#display-mode").value = "output"; toast(`${name} 已生成 Output Data`);
 }
-function computeAttenuation() {
+async function computeAttenuation() {
   const ds = currentDisplayed(); if (!ds) return toast("请先导入数据", "warn");
-  const vals = new Float32Array(ds.numSamples);
-  for (let s=0;s<ds.numSamples;s++){ let sum=0; for(let t=0;t<ds.numTraces;t++) sum += Math.abs(ds.data[t*ds.numSamples+s]); vals[s]=sum/ds.numTraces; }
-  openFloat("trace-window"); drawLine($("#trace-canvas"), [...vals], { title:"平均绝对振幅衰减", color:"#ffb020" });
-  $("#trace-stats").textContent = "衰减曲线显示中";
+  try {
+    $("#footer-status").textContent = "正在计算 MATGPR 衰减特征";
+    const result = await runWorker("attenuation-analysis", ds, {});
+    store.setOutput({ ...result, name: `${ds.name || "data"}_attenuation` }, { name: "Attenuation Analysis", op: "attenuation-analysis", params: {} });
+    displaySource = "output"; $("#display-mode").value = "output";
+    openFloat("trace-window");
+    drawLine($("#trace-canvas"), [...result.data.slice(0, result.numSamples)], { title:"Median instantaneous power", color:"#ffb020" });
+    $("#trace-stats").textContent = `power-law t^${result.powerLaw?.[1]?.toFixed?.(3) ?? "?"} · exp ${result.exponential?.[1]?.toFixed?.(3) ?? "?"}`;
+    $("#footer-status").textContent = "衰减特征已生成 Output Data";
+    toast("Attenuation Analysis 已生成 Output Data");
+  } catch (error) {
+    toast(error.message, "err");
+    $("#footer-status").textContent = "衰减特征计算失败";
+  }
 }
 function simpleVelocityCalc() {
   const epsr = Number(prompt("相对介电常数 εr", "9") || 9);

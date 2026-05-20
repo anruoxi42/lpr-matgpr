@@ -37,6 +37,8 @@ export function hamming(n) {
 }
 
 function linearInterpolate(xs, ys, x) {
+  if (!xs.length) return 0;
+  if (xs.length === 1) return ys[0] || 0;
   if (x <= xs[0]) return ys[0];
   const last = xs.length - 1;
   if (x >= xs[last]) return ys[last];
@@ -44,6 +46,118 @@ function linearInterpolate(xs, ys, x) {
   while (i < last && xs[i + 1] < x) i++;
   const span = xs[i + 1] - xs[i] || 1;
   return ys[i] + (ys[i + 1] - ys[i]) * ((x - xs[i]) / span);
+}
+
+function lowerBound(xs, x) {
+  let lo = 0, hi = xs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid] < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function cubicInterpolate(xs, ys, x, fill = 0) {
+  const n = xs.length;
+  if (!n) return fill;
+  if (n === 1) return ys[0];
+  if (n < 4 || x <= xs[0] || x >= xs[n - 1]) return linearInterpolate(xs, ys, x);
+  const hi = lowerBound(xs, x);
+  const start = clamp(hi - 2, 0, n - 4);
+  let y = 0;
+  for (let i = 0; i < 4; i++) {
+    let basis = 1;
+    const xi = xs[start + i];
+    for (let j = 0; j < 4; j++) {
+      if (i === j) continue;
+      const xj = xs[start + j];
+      basis *= (x - xj) / ((xi - xj) || 1e-12);
+    }
+    y += ys[start + i] * basis;
+  }
+  return Number.isFinite(y) ? y : linearInterpolate(xs, ys, x);
+}
+
+function cubicSample(line, x, fill = 0) {
+  const n = line.length;
+  if (!n || x < 0 || x > n - 1) return fill;
+  if (n < 4 || x < 1 || x > n - 3) {
+    const i = Math.floor(x), f = x - i;
+    if (i < 0 || i >= n) return fill;
+    return i + 1 < n ? line[i] * (1 - f) + line[i + 1] * f : line[i];
+  }
+  const i = Math.floor(x), f = x - i;
+  const y0 = line[i - 1], y1 = line[i], y2 = line[i + 1], y3 = line[i + 2];
+  const f2 = f * f, f3 = f2 * f;
+  return 0.5 * ((2 * y1) + (-y0 + y2) * f + (2 * y0 - 5 * y1 + 4 * y2 - y3) * f2 + (-y0 + 3 * y1 - 3 * y2 + y3) * f3);
+}
+
+function parseTraceRanges(ranges, nt) {
+  const bad = new Set();
+  for (const part of String(ranges || "").split(",")) {
+    const text = part.trim();
+    if (!text) continue;
+    const m = text.match(/^(\d+)\s*[-~]\s*(\d+)$/);
+    if (m) {
+      const a = Math.max(0, Math.min(nt - 1, Number(m[1])));
+      const b = Math.max(0, Math.min(nt - 1, Number(m[2])));
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) bad.add(i);
+    } else if (/^\d+$/.test(text)) {
+      const i = Number(text);
+      if (i >= 0 && i < nt) bad.add(i);
+    }
+  }
+  return [...bad].sort((a, b) => a - b);
+}
+
+export function parseVofh(input, fallbackVelocity = 0.1) {
+  if (typeof input === "number") return [[clamp(input || fallbackVelocity, 1e-6, 0.2998), 0]];
+  if (Array.isArray(input)) {
+    const rows = input.map(row => Array.isArray(row) ? row : [row?.velocity, row?.thickness])
+      .map(row => [Number(row[0]), Number(row[1] ?? 0)])
+      .filter(row => Number.isFinite(row[0]) && row[0] > 0);
+    if (rows.length) return rows.map(([v, h]) => [clamp(v, 1e-6, 0.2998), Math.max(0, Number.isFinite(h) ? h : 0)]);
+  }
+  const text = String(input ?? "").trim();
+  const rows = [];
+  for (const line of text.split(/[\n;]+/)) {
+    const nums = line.match(/[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g)?.map(Number) || [];
+    if (nums.length) rows.push([clamp(nums[0], 1e-6, 0.2998), Math.max(0, nums[1] ?? 0)]);
+  }
+  return rows.length ? rows : [[clamp(fallbackVelocity, 1e-6, 0.2998), 0]];
+}
+
+function depthAtTime(tNs, vofh) {
+  let t = Math.max(0, tNs), z = 0;
+  for (let i = 0; i < vofh.length; i++) {
+    const [v, h] = vofh[i];
+    if (h <= 0 || i === vofh.length - 1) return z + 0.5 * t * v;
+    const layerTime = 2 * h / v;
+    if (t <= layerTime) return z + 0.5 * t * v;
+    z += h;
+    t -= layerTime;
+  }
+  return z;
+}
+
+function timeAtDepth(zM, vofh) {
+  let z = Math.max(0, zM), t = 0;
+  for (let i = 0; i < vofh.length; i++) {
+    const [v, h] = vofh[i];
+    if (h <= 0 || i === vofh.length - 1) return t + 2 * z / v;
+    if (z <= h) return t + 2 * z / v;
+    t += 2 * h / v;
+    z -= h;
+  }
+  return t;
+}
+
+export function depthAxisFromVofh(ns, dtNs = 0.625, vofhInput = "0.1,0") {
+  const vofh = parseVofh(vofhInput);
+  const axis = new Float32Array(ns);
+  for (let s = 0; s < ns; s++) axis[s] = depthAtTime(s * dtNs, vofh);
+  return axis;
 }
 
 function firResponseMag(b, w) {
@@ -82,6 +196,44 @@ function solveLeastSquares(A, y) {
     }
   }
   return aty;
+}
+
+function solveLinearSystem(matrix, rhs) {
+  const n = rhs.length;
+  const A = Array.from({ length: n }, (_, r) => Float64Array.from(matrix[r]));
+  const b = Float64Array.from(rhs);
+  for (let i = 0; i < n; i++) {
+    let pivot = i;
+    for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[pivot][i])) pivot = r;
+    if (pivot !== i) { [A[i], A[pivot]] = [A[pivot], A[i]]; [b[i], b[pivot]] = [b[pivot], b[i]]; }
+    const div = Math.abs(A[i][i]) > 1e-12 ? A[i][i] : (A[i][i] < 0 ? -1e-12 : 1e-12);
+    for (let c = i; c < n; c++) A[i][c] /= div;
+    b[i] /= div;
+    for (let r = 0; r < n; r++) {
+      if (r === i) continue;
+      const f = A[r][i];
+      if (Math.abs(f) < 1e-18) continue;
+      for (let c = i; c < n; c++) A[r][c] -= f * A[i][c];
+      b[r] -= f * b[i];
+    }
+  }
+  return b;
+}
+
+function solveComplexLinear(ar, ai, br, bi) {
+  const n = br.length;
+  const A = Array.from({ length: 2 * n }, () => new Float64Array(2 * n));
+  const b = new Float64Array(2 * n);
+  for (let r = 0; r < n; r++) {
+    b[r] = br[r]; b[r + n] = bi[r];
+    for (let c = 0; c < n; c++) {
+      const rr = ar[r][c], ii = ai[r][c];
+      A[r][c] = rr; A[r][c + n] = -ii;
+      A[r + n][c] = ii; A[r + n][c + n] = rr;
+    }
+  }
+  const x = solveLinearSystem(A, b);
+  return { re: x.slice(0, n), im: x.slice(n, 2 * n) };
 }
 
 export function fminsearch(fn, start, opts = {}) {
@@ -273,17 +425,24 @@ export function signalPosition(d, nt, ns, shift = 0) {
   for (let t = 0; t < nt; t++) for (let s = 0; s < nns; s++) o[t * nns + s] = d[t * ns + start + s];
   return { data: o, numTraces: nt, numSamples: nns, sampleStart: start, timeZeroSample: start };
 }
-export function removeBadTraces(d, nt, ns, ranges = "") {
-  const remove = new Set();
-  for (const part of String(ranges).split(",")) {
-    const m = part.trim().match(/^(\d+)\s*[-~]\s*(\d+)$/);
-    if (m) for (let i = +m[1]; i <= +m[2]; i++) remove.add(i);
-    else if (/^\d+$/.test(part.trim())) remove.add(+part.trim());
+export function removeBadTraces(d, nt, ns, ranges = "", params = {}) {
+  const bad = parseTraceRanges(ranges, nt);
+  const badSet = new Set(bad);
+  const o = new Float32Array(d);
+  if (!bad.length) return { data: o, numTraces: nt, numSamples: ns, badTraces: [] };
+  const rawX = params.x || params.distanceAxisM;
+  const x = new Float64Array(nt);
+  for (let t = 0; t < nt; t++) x[t] = Number(rawX?.[t] ?? t);
+  const good = [];
+  for (let t = 0; t < nt; t++) if (!badSet.has(t)) good.push(t);
+  if (!good.length) return { data: o, numTraces: nt, numSamples: ns, badTraces: bad };
+  const xGood = Float64Array.from(good, t => x[t]);
+  const yGood = new Float64Array(good.length);
+  for (let s = 0; s < ns; s++) {
+    for (let i = 0; i < good.length; i++) yGood[i] = d[good[i] * ns + s];
+    for (const t of bad) o[t * ns + s] = cubicInterpolate(xGood, yGood, x[t], yGood[0] || 0);
   }
-  const keep = []; for (let i = 0; i < nt; i++) if (!remove.has(i)) keep.push(i);
-  const o = new Float32Array(keep.length * ns);
-  keep.forEach((k, i) => o.set(d.subarray(k * ns, k * ns + ns), i * ns));
-  return { data: o, numTraces: keep.length, numSamples: ns };
+  return { data: o, numTraces: nt, numSamples: ns, badTraces: bad };
 }
 export function backgroundRemove(d, nt, ns) {
   const bg = new Float64Array(ns), o = new Float32Array(d.length);
@@ -575,6 +734,16 @@ function fftShift2(re, im, rows, cols) {
   re.set(rr); im.set(ii);
 }
 
+function fftShift1(re, im) {
+  const n = re.length, h = Math.floor(n / 2);
+  const rr = new Float64Array(n), ii = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const j = (i + h) % n;
+    rr[j] = re[i]; ii[j] = im[i];
+  }
+  re.set(rr); im.set(ii);
+}
+
 function pointInPolygon(x, y, poly) {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -653,6 +822,264 @@ export function fkSpectrum(d, nt, ns, dtNs = 0.625, dxM = 0.05, maxSize = 256) {
   return { values, width, height, fMaxGHz: 1 / (2 * dtNs), kMax: 1 / (2 * Math.max(Math.abs(dxM), 1e-9)) };
 }
 
+function migrationParams(params, velocity = 0.1, dt = 0.625, dx = 0.05) {
+  if (typeof params === "object") {
+    return {
+      dtNs: safeNumber(params.dtNs ?? params.dt, dt),
+      dxM: safeNumber(params.dxM ?? params.dx, dx),
+      vofh: parseVofh(params.vofh ?? params.velocity, safeNumber(params.velocity, velocity)),
+      dzM: safeNumber(params.dzM ?? params.dz, NaN),
+      zMaxM: safeNumber(params.zMaxM ?? params.zMax, NaN),
+      fMaxGHz: safeNumber(params.fMaxGHz, NaN),
+      q: safeNumber(params.q, NaN),
+      antennaFreqMHz: safeNumber(params.antennaFreqMHz, NaN)
+    };
+  }
+  return { dtNs: dt, dxM: dx, vofh: parseVofh(velocity), dzM: NaN, zMaxM: NaN, fMaxGHz: NaN, q: NaN, antennaFreqMHz: NaN };
+}
+
+function velocityProfile(ns, dtNs, vofh) {
+  const zt = new Float64Array(ns);
+  const vrms = new Float64Array(ns);
+  zt[0] = 0;
+  vrms[0] = vofh[0][0];
+  let cum = 0;
+  for (let s = 0; s < ns; s++) zt[s] = depthAtTime(s * dtNs, vofh);
+  for (let s = 1; s < ns; s++) {
+    const vint = Math.max(1e-6, 2 * (zt[s] - zt[s - 1]) / dtNs);
+    cum += dtNs * vint * vint;
+    vrms[s] = Math.sqrt(cum / Math.max(dtNs, s * dtNs));
+  }
+  return { zt, vrms };
+}
+
+function velocityAtDepth(zM, vofh) {
+  let z = Math.max(0, zM);
+  for (let i = 0; i < vofh.length; i++) {
+    const [v, h] = vofh[i];
+    if (h <= 0 || i === vofh.length - 1 || z <= h) return v;
+    z -= h;
+  }
+  return vofh[vofh.length - 1][0];
+}
+
+function complexInterpColumn(re, im, rows, cols, col, pos) {
+  if (pos < 0 || pos > rows - 1) return [0, 0];
+  const r0 = Math.floor(pos), f = pos - r0;
+  const i0 = r0 * cols + col;
+  if (r0 >= rows - 1) return [re[i0], im[i0]];
+  const i1 = i0 + cols;
+  return [re[i0] * (1 - f) + re[i1] * f, im[i0] * (1 - f) + im[i1] * f];
+}
+
+function stoltUniform(d, nt, ns, dtNs, dxM, velocity) {
+  const rows = nextPow2(2 * ns), cols = nextPow2(nt);
+  const re = new Float64Array(rows * cols), im = new Float64Array(rows * cols);
+  for (let t = 0; t < nt; t++) for (let s = 0; s < ns; s++) re[s * cols + t] = d[t * ns + s];
+  fft2D(re, im, rows, cols);
+  fftShift2(re, im, rows, cols);
+  const imgR = new Float64Array(rows * cols), imgI = new Float64Array(rows * cols);
+  const dz = Math.max(1e-9, velocity * dtNs / 2);
+  const w0 = -Math.PI / dtNs, dw = 2 * Math.PI / (rows * dtNs);
+  const kx0 = -Math.PI / Math.max(dxM, 1e-9), dkx = 2 * Math.PI / (cols * Math.max(dxM, 1e-9));
+  const kz0 = -Math.PI / dz, dkz = 2 * Math.PI / (rows * dz);
+  for (let c = 0; c < cols; c++) {
+    const kx = kx0 + c * dkx;
+    for (let r = 0; r < rows; r++) {
+      const kz = kz0 + r * dkz;
+      const ks = Math.hypot(kx, kz);
+      if (ks < 1e-12) continue;
+      const wz = Math.sign(kz || 1) * ks * velocity / 2;
+      const pos = (wz - w0) / dw;
+      const [fr, fi] = complexInterpColumn(re, im, rows, cols, c, pos);
+      const scale = velocity * Math.abs(kz) / ks;
+      imgR[r * cols + c] = fr * scale;
+      imgI[r * cols + c] = fi * scale;
+    }
+  }
+  fftShift2(imgR, imgI, rows, cols);
+  fft2D(imgR, imgI, rows, cols, true);
+  const out = new Float32Array(nt * ns);
+  for (let t = 0; t < nt; t++) for (let s = 0; s < ns; s++) out[t * ns + s] = imgR[s * cols + t];
+  return out;
+}
+
+export function stoltMigration(d, nt, ns, params = {}) {
+  const { dtNs, dxM, vofh } = migrationParams(params);
+  if (vofh.length === 1 || vofh.every(([, h], i) => i === vofh.length - 1 || h === 0)) {
+    return { data: stoltUniform(d, nt, ns, dtNs, dxM, vofh[0][0]), numTraces: nt, numSamples: ns, vofh };
+  }
+  const { vrms } = velocityProfile(ns, dtNs, vofh);
+  let vmig = Infinity;
+  for (let s = 1; s < ns; s++) if (vrms[s] > 0) vmig = Math.min(vmig, vrms[s]);
+  if (!Number.isFinite(vmig)) vmig = vofh[0][0];
+  const st = new Float64Array(ns);
+  const scale = 2 / (vmig * vmig);
+  let cum = 0;
+  for (let s = 1; s < ns; s++) {
+    const t0 = (s - 1) * dtNs, t1 = s * dtNs;
+    cum += 0.5 * dtNs * (t0 * vrms[s - 1] * vrms[s - 1] + t1 * vrms[s] * vrms[s]);
+    st[s] = Math.sqrt(Math.max(0, scale * cum));
+  }
+  let delt = Infinity;
+  for (let s = 1; s < ns; s++) if (st[s] > st[s - 1]) delt = Math.min(delt, st[s] - st[s - 1]);
+  if (!Number.isFinite(delt) || delt <= 0) delt = dtNs;
+  const nss = Math.max(ns, Math.ceil(st[ns - 1] / delt) + 1);
+  const tt = Float64Array.from({ length: ns }, (_, s) => s * dtNs);
+  const ds = new Float32Array(nt * nss);
+  for (let t = 0; t < nt; t++) {
+    const line = d.subarray(t * ns, t * ns + ns);
+    for (let s = 0; s < nss; s++) {
+      const sourceT = cubicInterpolate(st, tt, s * delt, 0);
+      ds[t * nss + s] = cubicSample(line, sourceT / dtNs, 0);
+    }
+  }
+  const migrated = stoltUniform(ds, nt, nss, delt, dxM, vmig);
+  const out = new Float32Array(nt * ns);
+  for (let t = 0; t < nt; t++) {
+    const line = migrated.subarray(t * nss, t * nss + nss);
+    for (let s = 0; s < ns; s++) out[t * ns + s] = cubicSample(line, st[s] / delt, 0);
+  }
+  return { data: out, numTraces: nt, numSamples: ns, vofh, migrationVelocity: vmig };
+}
+
+function gazdagImage(d, nt, ns, dtNs, dxM, vofh) {
+  const rows = nextPow2(ns), cols = nextPow2(nt);
+  const fkR = new Float64Array(rows * cols), fkI = new Float64Array(rows * cols);
+  for (let t = 0; t < nt; t++) for (let s = 0; s < ns; s++) fkR[s * cols + t] = d[t * ns + s];
+  fft2D(fkR, fkI, rows, cols);
+  fftShift2(fkR, fkI, rows, cols);
+  const imgR = new Float64Array(ns * cols), imgI = new Float64Array(ns * cols);
+  const w0 = -Math.PI / dtNs, dw = 2 * Math.PI / (rows * dtNs);
+  const kx0 = -Math.PI / Math.max(dxM, 1e-9), dkx = 2 * Math.PI / (cols * Math.max(dxM, 1e-9));
+  const vByTime = new Float64Array(ns);
+  if (vofh.length === 1) vByTime.fill(vofh[0][0]);
+  else {
+    const { zt } = velocityProfile(ns, dtNs, vofh);
+    for (let s = 0; s < ns - 1; s++) vByTime[s] = Math.max(1e-6, 2 * (zt[s + 1] - zt[s]) / dtNs);
+    vByTime[ns - 1] = vByTime[ns - 2] || vofh[0][0];
+  }
+  const tMax = Math.max(dtNs, (ns - 1) * dtNs);
+  for (let c = 0; c < cols; c++) {
+    const kx = kx0 + c * dkx;
+    const workR = new Float64Array(rows), workI = new Float64Array(rows);
+    for (let r = 0; r < rows; r++) { workR[r] = fkR[r * cols + c]; workI[r] = fkI[r * cols + c]; }
+    for (let s = 0; s < ns; s++) {
+      const v = vByTime[s];
+      const tau = s * dtNs;
+      let sumR = 0, sumI = 0;
+      for (let r = 0; r < rows; r++) {
+        let w = w0 + r * dw;
+        if (Math.abs(w) < 1e-12) w = 1e-12 / dtNs;
+        const coss = 1 - ((0.5 * v * kx) / w) ** 2;
+        if (coss > (vofh.length === 1 ? 0 : (tau / tMax) ** 2)) {
+          const phase = -w * dtNs * Math.sqrt(Math.max(0, coss));
+          const cr = Math.cos(phase), ci = -Math.sin(phase);
+          const nr = workR[r] * cr - workI[r] * ci;
+          const ni = workR[r] * ci + workI[r] * cr;
+          workR[r] = nr; workI[r] = ni;
+          sumR += nr; sumI += ni;
+        } else {
+          workR[r] = 0; workI[r] = 0;
+        }
+      }
+      imgR[s * cols + c] = sumR / rows;
+      imgI[s * cols + c] = sumI / rows;
+    }
+  }
+  const out = new Float32Array(nt * ns);
+  for (let s = 0; s < ns; s++) {
+    const lr = new Float64Array(cols), li = new Float64Array(cols);
+    for (let c = 0; c < cols; c++) { lr[c] = imgR[s * cols + c]; li[c] = imgI[s * cols + c]; }
+    fftShift1(lr, li);
+    fft(lr, li, true);
+    for (let t = 0; t < nt; t++) out[t * ns + s] = lr[t];
+  }
+  return out;
+}
+
+export function gazdagMigration(d, nt, ns, params = {}) {
+  const { dtNs, dxM, vofh } = migrationParams(params);
+  return { data: gazdagImage(d, nt, ns, dtNs, dxM, vofh), numTraces: nt, numSamples: ns, vofh };
+}
+
+function toFkPositive(d, nt, ns, dtNs) {
+  const ntpad = nextPow2(2 * ns), cols = nextPow2(nt);
+  const nf = Math.floor(ntpad / 2) + 1;
+  const fkR = new Float64Array(nf * cols), fkI = new Float64Array(nf * cols);
+  for (let t = 0; t < nt; t++) {
+    const tr = new Float64Array(ntpad), ti = new Float64Array(ntpad);
+    tr.set(d.subarray(t * ns, t * ns + ns));
+    fft(tr, ti);
+    for (let k = 0; k < nf; k++) { fkR[k * cols + t] = tr[k]; fkI[k * cols + t] = ti[k]; }
+  }
+  for (let k = 0; k < nf; k++) {
+    const lr = fkR.slice(k * cols, k * cols + cols), li = fkI.slice(k * cols, k * cols + cols);
+    fft(lr, li, true);
+    fkR.set(lr, k * cols); fkI.set(li, k * cols);
+  }
+  const f = Float64Array.from({ length: nf }, (_, k) => k / (ntpad * dtNs));
+  return { fkR, fkI, f, cols };
+}
+
+export function splitStepMigration(d, nt, ns, params = {}) {
+  const mp = migrationParams(params);
+  const dzM = Number.isFinite(mp.dzM) && mp.dzM > 0 ? mp.dzM : 0.02;
+  const zMax = Number.isFinite(mp.zMaxM) && mp.zMaxM > 0 ? mp.zMaxM : depthAtTime((ns - 1) * mp.dtNs, mp.vofh);
+  const zAxis = new Float32Array(Math.max(2, Math.floor(zMax / dzM) + 1));
+  for (let z = 0; z < zAxis.length; z++) zAxis[z] = z * dzM;
+  const { fkR, fkI, f, cols } = toFkPositive(d, nt, ns, mp.dtNs);
+  const fNyq = 1 / (2 * mp.dtNs);
+  const fMax = Number.isFinite(mp.fMaxGHz) && mp.fMaxGHz > 0 ? Math.min(mp.fMaxGHz, fNyq) : 0.6 * fNyq;
+  let nfmax = 1;
+  while (nfmax < f.length && f[nfmax] <= fMax) nfmax++;
+  const kxNyq = 1 / (2 * Math.max(mp.dxM, 1e-9)), dkx = 2 * kxNyq / cols;
+  const kx = Float64Array.from({ length: cols }, (_, i) => i <= cols / 2 ? i * dkx : (i - cols) * dkx);
+  const out = new Float32Array(nt * zAxis.length);
+  const useDispersion = Number.isFinite(mp.q) && mp.q > 0 && Number.isFinite(mp.antennaFreqMHz) && mp.antennaFreqMHz > 0;
+  const expq = useDispersion ? 0.5 * (1 - (2 / Math.PI) * Math.atan(mp.q)) : 0;
+  const wc = useDispersion ? 2 * Math.PI * mp.antennaFreqMHz * 1e6 : 1;
+  for (let iz = 0; iz < zAxis.length; iz++) {
+    const baseV = 0.5 * velocityAtDepth(zAxis[iz], mp.vofh);
+    for (let c = 0; c < cols; c++) {
+      const k2 = kx[c] * kx[c];
+      for (let jf = 1; jf < nfmax; jf++) {
+        const freq = f[jf];
+        const disperse = useDispersion ? ((2 * Math.PI * freq * 1e9) / wc) ** expq : 1;
+        const v = Math.max(1e-6, baseV * disperse);
+        const coss = 1 - (v * v * k2) / Math.max(freq * freq, 1e-18);
+        const idx = jf * cols + c;
+        if (coss <= 0) { fkR[idx] = 0; fkI[idx] = 0; continue; }
+        const phase = (2 * Math.PI * freq / v) * (Math.sqrt(coss) - 1) * dzM;
+        const cr = Math.cos(phase), ci = Math.sin(phase);
+        const nr = fkR[idx] * cr - fkI[idx] * ci;
+        const ni = fkR[idx] * ci + fkI[idx] * cr;
+        fkR[idx] = nr; fkI[idx] = ni;
+      }
+    }
+    for (let jf = 1; jf < nfmax; jf++) {
+      const lr = fkR.slice(jf * cols, jf * cols + cols), li = fkI.slice(jf * cols, jf * cols + cols);
+      fft(lr, li);
+      const freq = f[jf];
+      const disperse = useDispersion ? ((2 * Math.PI * freq * 1e9) / wc) ** expq : 1;
+      const v = Math.max(1e-6, baseV * disperse);
+      const phase = 2 * Math.PI * freq * dzM / v;
+      const cr = Math.cos(phase), ci = Math.sin(phase);
+      for (let t = 0; t < nt; t++) {
+        const nr = lr[t] * cr - li[t] * ci;
+        const ni = lr[t] * ci + li[t] * cr;
+        lr[t] = nr; li[t] = ni;
+        out[t * zAxis.length + iz] += 2 * nr;
+      }
+      fft(lr, li, true);
+      fkR.set(lr, jf * cols); fkI.set(li, jf * cols);
+    }
+  }
+  const norm = 1 / Math.max(1, 2 * nfmax);
+  for (let i = 0; i < out.length; i++) out[i] *= norm;
+  return { data: out, numTraces: nt, numSamples: zAxis.length, depthAxisM: zAxis, depthStep: dzM, verticalAxisKind: "depth", vofh: mp.vofh };
+}
+
 export function simpleMigration(d, nt, ns, velocity = 0.1, dt = 0.625, dx = 0.05) {
   const o = new Float32Array(d.length), radius = Math.max(1, Math.round(velocity * dt / Math.max(dx, 1e-6) * 3));
   for (let t = 0; t < nt; t++) for (let s = 0; s < ns; s++) {
@@ -665,15 +1092,320 @@ export function simpleMigration(d, nt, ns, velocity = 0.1, dt = 0.625, dx = 0.05
   }
   return { data: o, numTraces: nt, numSamples: ns };
 }
-export function timeDepth(d, nt, ns, velocity = 0.1, dt = 0.625, dz = 0.02) {
-  const maxDepth = velocity * (ns - 1) * dt / 2, newNs = Math.max(2, Math.ceil(maxDepth / dz));
+
+export function timeDepth(d, nt, ns, velocityOrParams = 0.1, dt = 0.625, dz = 0.02) {
+  const params = typeof velocityOrParams === "object" ? velocityOrParams : { velocity: velocityOrParams, dt, dz };
+  const dtNs = safeNumber(params.dtNs ?? params.dt, dt);
+  const vofh = parseVofh(params.vofh ?? params.velocity, safeNumber(params.velocity, 0.1));
+  const maxDepth = depthAtTime((ns - 1) * dtNs, vofh);
+  const dzM = safeNumber(params.dzM ?? params.dz, dz || vofh[0][0] * dtNs / 2);
+  const newNs = Math.max(2, Math.ceil(maxDepth / Math.max(dzM, 1e-9)));
+  const depthAxisM = new Float32Array(newNs);
   const o = new Float32Array(nt * newNs);
-  for (let t = 0; t < nt; t++) for (let z = 0; z < newNs; z++) {
-    const sample = (z * dz) * 2 / (velocity * dt), i = Math.floor(sample), f = sample - i;
-    o[t * newNs + z] = i >= 0 && i < ns - 1 ? d[t * ns + i] * (1 - f) + d[t * ns + i + 1] * f : 0;
+  for (let z = 0; z < newNs; z++) depthAxisM[z] = z * dzM;
+  for (let t = 0; t < nt; t++) {
+    const line = d.subarray(t * ns, t * ns + ns);
+    for (let z = 0; z < newNs; z++) {
+      const sample = timeAtDepth(depthAxisM[z], vofh) / dtNs;
+      o[t * newNs + z] = cubicSample(line, sample, 0);
+    }
   }
-  return { data: o, numTraces: nt, numSamples: newNs, depthStep: dz };
+  return { data: o, numTraces: nt, numSamples: newNs, depthStep: dzM, depthAxisM, verticalAxisKind: "depth", vofh };
 }
+
+function dot(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+  return s;
+}
+
+function norm(a) {
+  return Math.sqrt(dot(a, a));
+}
+
+function orthogonalize(v, basis) {
+  for (const b of basis) {
+    const c = dot(v, b);
+    for (let i = 0; i < v.length; i++) v[i] -= c * b[i];
+  }
+  const n = norm(v);
+  if (n > 1e-12) for (let i = 0; i < v.length; i++) v[i] /= n;
+  return n;
+}
+
+export function karhunenLoeveFilter(d, nt, ns, params = {}) {
+  const p = clamp(Math.floor(safeNumber(params.components ?? params.width, 9)), 1, Math.min(nt, ns));
+  const output = String(params.output || "model").toLowerCase();
+  const us = [], vs = [], sigmas = [];
+  const multiplyV = v => {
+    const u = new Float64Array(ns);
+    for (let t = 0; t < nt; t++) {
+      const vt = v[t];
+      for (let s = 0; s < ns; s++) u[s] += d[t * ns + s] * vt;
+    }
+    return u;
+  };
+  const multiplyTU = u => {
+    const v = new Float64Array(nt);
+    for (let t = 0; t < nt; t++) {
+      let sum = 0;
+      for (let s = 0; s < ns; s++) sum += d[t * ns + s] * u[s];
+      v[t] = sum;
+    }
+    return v;
+  };
+  for (let c = 0; c < p; c++) {
+    let v = Float64Array.from({ length: nt }, (_, i) => Math.sin((i + 1) * (c + 1) * 1.61803398875) + 0.25 * Math.cos((i + 3) * (c + 2)));
+    orthogonalize(v, vs);
+    for (let iter = 0; iter < 32; iter++) {
+      let u = multiplyV(v);
+      for (let j = 0; j < us.length; j++) for (let s = 0; s < ns; s++) u[s] -= sigmas[j] * us[j][s] * dot(v, vs[j]);
+      const su = norm(u);
+      if (su <= 1e-12) break;
+      for (let s = 0; s < ns; s++) u[s] /= su;
+      v = multiplyTU(u);
+      orthogonalize(v, vs);
+    }
+    const u = multiplyV(v);
+    const sigma = norm(u);
+    if (sigma <= 1e-10) break;
+    for (let s = 0; s < ns; s++) u[s] /= sigma;
+    us.push(u); vs.push(v); sigmas.push(sigma);
+  }
+  const model = new Float32Array(nt * ns);
+  for (let c = 0; c < sigmas.length; c++) {
+    const u = us[c], v = vs[c], sigma = sigmas[c];
+    for (let t = 0; t < nt; t++) for (let s = 0; s < ns; s++) model[t * ns + s] += sigma * u[s] * v[t];
+  }
+  if (output === "residual") {
+    const residual = new Float32Array(nt * ns);
+    for (let i = 0; i < d.length; i++) residual[i] = d[i] - model[i];
+    return { data: residual, numTraces: nt, numSamples: ns, components: sigmas.length, output };
+  }
+  return { data: model, numTraces: nt, numSamples: ns, components: sigmas.length, output: "model" };
+}
+
+function complexLeastSquares(rowsR, rowsI, yR, yI, muPercent) {
+  const rows = rowsR.length, cols = rowsR[0]?.length || 0;
+  const br = Array.from({ length: cols }, () => new Float64Array(cols));
+  const bi = Array.from({ length: cols }, () => new Float64Array(cols));
+  const rr = new Float64Array(cols), ri = new Float64Array(cols);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const acr = rowsR[r][c], aci = -rowsI[r][c];
+      rr[c] += acr * yR[r] - aci * yI[r];
+      ri[c] += acr * yI[r] + aci * yR[r];
+      for (let k = 0; k < cols; k++) {
+        const bcr = rowsR[r][k], bci = rowsI[r][k];
+        br[c][k] += acr * bcr - aci * bci;
+        bi[c][k] += acr * bci + aci * bcr;
+      }
+    }
+  }
+  const beta = Math.max(1e-12, Math.abs(br[0]?.[0] || 1) * safeNumber(muPercent, 1) / 100);
+  for (let i = 0; i < cols; i++) br[i][i] += beta;
+  return solveComplexLinear(br, bi, rr, ri);
+}
+
+function arModeling(xr, xi, lf, muPercent) {
+  const nx = xr.length;
+  lf = clamp(Math.floor(lf), 1, Math.max(1, Math.floor((nx - 1) / 2)));
+  const rows = nx - lf;
+  if (rows <= lf) return { yfR: Float64Array.from(xr), yfI: Float64Array.from(xi), ybR: Float64Array.from(xr), ybI: Float64Array.from(xi) };
+  const ybR = new Float64Array(nx), ybI = new Float64Array(nx), yfR = new Float64Array(nx), yfI = new Float64Array(nx);
+  const backR = [], backI = [], byR = new Float64Array(rows), byI = new Float64Array(rows);
+  for (let r = 0; r < rows; r++) {
+    const mr = new Float64Array(lf), mi = new Float64Array(lf);
+    byR[r] = xr[r]; byI[r] = xi[r];
+    for (let c = 0; c < lf; c++) { mr[c] = xr[r + c + 1]; mi[c] = xi[r + c + 1]; }
+    backR.push(mr); backI.push(mi);
+  }
+  const ab = complexLeastSquares(backR, backI, byR, byI, muPercent);
+  for (let r = 0; r < rows; r++) {
+    let sr = 0, si = 0;
+    for (let c = 0; c < lf; c++) {
+      sr += backR[r][c] * ab.re[c] - backI[r][c] * ab.im[c];
+      si += backR[r][c] * ab.im[c] + backI[r][c] * ab.re[c];
+    }
+    ybR[r] = sr; ybI[r] = si;
+  }
+  const forR = [], forI = [], fyR = new Float64Array(rows), fyI = new Float64Array(rows);
+  for (let r = 0; r < rows; r++) {
+    const mr = new Float64Array(lf), mi = new Float64Array(lf);
+    fyR[r] = xr[lf + r]; fyI[r] = xi[lf + r];
+    for (let c = 0; c < lf; c++) {
+      const idx = lf + r - c - 1;
+      mr[c] = xr[idx]; mi[c] = xi[idx];
+    }
+    forR.push(mr); forI.push(mi);
+  }
+  const af = complexLeastSquares(forR, forI, fyR, fyI, muPercent);
+  for (let r = 0; r < rows; r++) {
+    let sr = 0, si = 0;
+    for (let c = 0; c < lf; c++) {
+      sr += forR[r][c] * af.re[c] - forI[r][c] * af.im[c];
+      si += forR[r][c] * af.im[c] + forI[r][c] * af.re[c];
+    }
+    yfR[lf + r] = sr; yfI[lf + r] = si;
+  }
+  return { yfR, yfI, ybR, ybI };
+}
+
+export function fxDecon(d, nt, ns, params = {}) {
+  const dtNs = safeNumber(params.dtNs ?? params.dt, 0.625);
+  const lf = Math.max(1, Math.floor(safeNumber(params.operatorLength ?? params.lf, 8)));
+  const mu = safeNumber(params.muPercent ?? params.mu, 1);
+  const flowGHz = safeNumber(params.flowMHz, 20) / 1000;
+  const fhighGHz = safeNumber(params.fhighMHz, 1 / (2 * dtNs) * 1000) / 1000;
+  const nfft = nextPow2(ns);
+  const fxR = new Float64Array(nfft * nt), fxI = new Float64Array(nfft * nt);
+  for (let t = 0; t < nt; t++) {
+    const tr = new Float64Array(nfft), ti = new Float64Array(nfft);
+    tr.set(d.subarray(t * ns, t * ns + ns));
+    fft(tr, ti);
+    for (let k = 0; k < nfft; k++) { fxR[k * nt + t] = tr[k]; fxI[k * nt + t] = ti[k]; }
+  }
+  const outFR = new Float64Array(nfft * nt), outFI = new Float64Array(nfft * nt);
+  const outBR = new Float64Array(nfft * nt), outBI = new Float64Array(nfft * nt);
+  const ilow = clamp(Math.floor(flowGHz * dtNs * nfft), 1, Math.floor(nfft / 2));
+  const ihigh = clamp(Math.floor(fhighGHz * dtNs * nfft), ilow, Math.floor(nfft / 2));
+  for (let k = ilow; k <= ihigh; k++) {
+    const xr = fxR.slice(k * nt, k * nt + nt), xi = fxI.slice(k * nt, k * nt + nt);
+    const { yfR, yfI, ybR, ybI } = arModeling(xr, xi, lf, mu);
+    outFR.set(yfR, k * nt); outFI.set(yfI, k * nt);
+    outBR.set(ybR, k * nt); outBI.set(ybI, k * nt);
+  }
+  for (let k = Math.floor(nfft / 2) + 1; k < nfft; k++) {
+    const src = nfft - k;
+    for (let t = 0; t < nt; t++) {
+      outFR[k * nt + t] = outFR[src * nt + t]; outFI[k * nt + t] = -outFI[src * nt + t];
+      outBR[k * nt + t] = outBR[src * nt + t]; outBI[k * nt + t] = -outBI[src * nt + t];
+    }
+  }
+  const out = new Float32Array(nt * ns);
+  for (let t = 0; t < nt; t++) {
+    const fr = new Float64Array(nfft), fi = new Float64Array(nfft), br = new Float64Array(nfft), bi = new Float64Array(nfft);
+    for (let k = 0; k < nfft; k++) {
+      fr[k] = outFR[k * nt + t]; fi[k] = outFI[k * nt + t];
+      br[k] = outBR[k * nt + t]; bi[k] = outBI[k * nt + t];
+    }
+    fft(fr, fi, true); fft(br, bi, true);
+    const div = t >= lf && t < nt - lf ? 2 : 1;
+    for (let s = 0; s < ns; s++) out[t * ns + s] = (fr[s] + br[s]) / div;
+  }
+  return { data: out, numTraces: nt, numSamples: ns, operatorLength: lf, muPercent: mu };
+}
+
+function rickerWavelet(freqMHz, dtNs, lengthSamples) {
+  const n = Math.max(5, Math.floor(lengthSamples) | 1);
+  const f = Math.max(1e-6, freqMHz / 1000);
+  const mid = Math.floor(n / 2);
+  const w = new Float64Array(n);
+  let e = 0;
+  for (let i = 0; i < n; i++) {
+    const t = (i - mid) * dtNs;
+    const a = Math.PI * Math.PI * f * f * t * t;
+    w[i] = (1 - 2 * a) * Math.exp(-a);
+    e += w[i] * w[i];
+  }
+  e = Math.sqrt(e) || 1;
+  for (let i = 0; i < n; i++) w[i] /= e;
+  return w;
+}
+
+function convolveWavelet(x, w) {
+  const y = new Float64Array(x.length + w.length - 1);
+  for (let i = 0; i < x.length; i++) for (let j = 0; j < w.length; j++) y[i + j] += x[i] * w[j];
+  return y;
+}
+
+function correlateWavelet(y, w, n) {
+  const x = new Float64Array(n);
+  for (let i = 0; i < n; i++) for (let j = 0; j < w.length; j++) x[i] += (y[i + j] || 0) * w[j];
+  return x;
+}
+
+function conjugateGradient(apply, b, maxIter = 80, tol = 1e-7) {
+  const n = b.length, x = new Float64Array(n), r = Float64Array.from(b), p = Float64Array.from(r);
+  let rs = dot(r, r);
+  const target = Math.max(tol * tol * rs, 1e-18);
+  for (let iter = 0; iter < maxIter && rs > target; iter++) {
+    const Ap = apply(p);
+    const alpha = rs / Math.max(1e-18, dot(p, Ap));
+    for (let i = 0; i < n; i++) { x[i] += alpha * p[i]; r[i] -= alpha * Ap[i]; }
+    const nr = dot(r, r), beta = nr / Math.max(1e-18, rs);
+    for (let i = 0; i < n; i++) p[i] = r[i] + beta * p[i];
+    rs = nr;
+  }
+  return x;
+}
+
+export function sparseDecon(d, nt, ns, params = {}) {
+  const dtNs = safeNumber(params.dtNs ?? params.dt, 0.625);
+  const w = params.wavelet ? Float64Array.from(params.wavelet) : rickerWavelet(safeNumber(params.frequencyMHz, 100), dtNs, safeNumber(params.lengthSamples, 64));
+  const mu = Math.max(0, safeNumber(params.mu, 0.01));
+  const iterMax = Math.max(1, Math.floor(safeNumber(params.iterations ?? params.iterMax, 10)));
+  const output = String(params.output || "reflectivity").toLowerCase();
+  const refl = new Float32Array(nt * ns), pred = new Float32Array(nt * ns);
+  let r0 = 0;
+  for (const v of w) r0 += v * v;
+  r0 *= ns;
+  for (let t = 0; t < nt; t++) {
+    const sPad = new Float64Array(ns + w.length - 1);
+    sPad.set(d.subarray(t * ns, t * ns + ns));
+    const g = correlateWavelet(sPad, w, ns);
+    let q = new Float64Array(ns);
+    q.fill(mu * r0);
+    let r = new Float64Array(ns);
+    for (let iter = 0; iter < iterMax; iter++) {
+      const apply = x => {
+        const wx = convolveWavelet(x, w);
+        const y = correlateWavelet(wx, w, ns);
+        for (let i = 0; i < ns; i++) y[i] += q[i] * x[i];
+        return y;
+      };
+      r = conjugateGradient(apply, g, Math.min(120, ns * 2), 1e-6);
+      for (let i = 0; i < ns; i++) q[i] = mu / (Math.abs(r[i]) + 0.0001);
+    }
+    const shift = Math.floor(w.length / 2);
+    for (let s = 0; s < ns; s++) refl[t * ns + s] = s >= shift ? r[s - shift] : 0;
+    const dp = convolveWavelet(r, w);
+    for (let s = 0; s < ns; s++) pred[t * ns + s] = dp[s] || 0;
+  }
+  return { data: output === "predicted" ? pred : refl, predicted: pred, numTraces: nt, numSamples: ns, wavelet: Float32Array.from(w), output };
+}
+
+export function attenuationAnalysis(d, nt, ns, params = {}) {
+  const dtNs = safeNumber(params.dtNs ?? params.dt, 0.625);
+  const tt = Float64Array.from({ length: ns }, (_, s) => s * dtNs);
+  const medianPower = attenuationCurve(d, nt, ns, "power", "median");
+  const meanPower = attenuationCurve(d, nt, ns, "power", "mean");
+  const fit = (kind) => {
+    const start = kind === "power" ? [Math.max(...medianPower), -2] : [Math.max(...medianPower), -1];
+    return fminsearch(a => {
+      const amp = Math.max(1e-18, Math.abs(a[0]));
+      let err = 0, n = 0;
+      for (let s = 1; s < ns; s++) {
+        const model = kind === "power" ? amp * (tt[s] ** a[1]) : amp * Math.exp(a[1] * tt[s]);
+        if (!Number.isFinite(model) || model <= 0 || medianPower[s] <= 0) continue;
+        const e = Math.log10(medianPower[s]) - Math.log10(model);
+        err += e * e; n++;
+      }
+      return Math.sqrt(err / Math.max(1, n));
+    }, start, { maxIter: 220, tol: 1e-6 });
+  };
+  const p = fit("power"), e = fit("exp");
+  p[0] = Math.abs(p[0]); e[0] = Math.abs(e[0]);
+  const out = new Float32Array(4 * ns);
+  for (let s = 0; s < ns; s++) {
+    out[s] = medianPower[s];
+    out[ns + s] = meanPower[s];
+    out[2 * ns + s] = s === 0 ? medianPower[0] : p[0] * (tt[s] ** p[1]);
+    out[3 * ns + s] = e[0] * Math.exp(e[1] * tt[s]);
+  }
+  return { data: out, numTraces: 4, numSamples: ns, powerLaw: p, exponential: e, attenuationKind: "power" };
+}
+
 export function instantaneous(d, nt, ns, attr = "amplitude", params = {}) {
   if (typeof attr === "object") { params = attr; attr = params.attr || "amplitude"; }
   const dtNs = safeNumber(params.dtNs, 0.625);
