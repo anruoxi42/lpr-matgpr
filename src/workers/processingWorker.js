@@ -1,34 +1,70 @@
 import * as A from "../processing/algorithms.js";
 
+function axisParams(dataset, params = {}) {
+  const meta = dataset.meta || {};
+  const dtNs = Number(params.dtNs ?? params.dt ?? dataset.dtNs ?? meta.dtNs ?? 0.625);
+  const dxM = Number(params.dxM ?? params.dx ?? dataset.dxM ?? meta.dxM ?? 0.05);
+  return {
+    dtNs: Number.isFinite(dtNs) && dtNs > 0 ? dtNs : 0.625,
+    dxM: Number.isFinite(dxM) && dxM > 0 ? dxM : 0.05
+  };
+}
+
+function buildAxis(count, step, offset = 0) {
+  const axis = new Float32Array(count);
+  for (let i = 0; i < count; i++) axis[i] = offset + i * step;
+  return axis;
+}
+
+function withUpdatedMeta(result, dataset, params = {}) {
+  const axes = axisParams(dataset, params);
+  const meta = { ...(dataset.meta || {}) };
+  const sampleStart = result.sampleStart || 0;
+  const dtNs = result.dtNs || axes.dtNs;
+  const dxM = result.dxM || axes.dxM;
+  meta.dtNs = dtNs;
+  meta.dxM = dxM;
+  meta.sampleRateHz = 1 / (dtNs * 1e-9);
+  meta.timeAxisNs = buildAxis(result.numSamples, dtNs, sampleStart * axes.dtNs);
+  meta.tt2w = meta.timeAxisNs;
+  meta.distanceAxisM = buildAxis(result.numTraces, dxM);
+  meta.x = meta.distanceAxisM;
+  return { ...result, meta, dtNs, dxM };
+}
+
 self.onmessage = ({ data }) => {
   const { id, op, dataset, params = {} } = data;
   try {
     const d = new Float32Array(dataset.data);
     const nt = dataset.numTraces, ns = dataset.numSamples;
+    const axes = axisParams(dataset, params);
     let r;
     if (op === "remove-dc") r = A.removeDC(d, nt, ns);
     else if (op === "trim-time") r = A.trimTime(d, nt, ns, params.start, params.end);
     else if (op === "signal-position") r = A.signalPosition(d, nt, ns, params.shift);
     else if (op === "bad-traces") r = A.removeBadTraces(d, nt, ns, params.ranges);
-    else if (op === "dewow") r = A.freqFilter(d, nt, ns, "hp", (params.cutoff || 2) * 1e6, 0, params.sampleRate || 1e9);
+    else if (op === "dewow") r = A.dewow(d, nt, ns);
     else if (op === "equalize") r = A.equalize(d, nt, ns);
-    else if (op === "resample-time") r = A.resample(d, nt, ns, "time", params.samples);
-    else if (op === "resample-scan" || op === "equal-spacing") r = A.resample(d, nt, ns, "scan", params.traces);
+    else if (op === "resample-time") r = A.resample(d, nt, ns, "time", params.samples, { ...params, dtNs: axes.dtNs });
+    else if (op === "resample-scan" || op === "equal-spacing") r = A.resample(d, nt, ns, "scan", params.traces, { ...params, dxM: axes.dxM });
     else if (op === "global-bg") r = A.backgroundRemove(d, nt, ns);
     else if (op === "horizontal") r = A.slidingBackground(d, nt, ns, params.width, "remove");
     else if (op === "dipping") r = A.slidingBackground(d, nt, ns, params.width, "retain");
-    else if (op === "agc") r = A.agc(d, nt, ns, params.window, false);
-    else if (op === "gagc") r = A.agc(d, nt, ns, params.window, true);
-    else if (op === "power-gain") r = A.powerGain(d, nt, ns, params.power);
-    else if (op === "amplitude-gain") r = A.amplitudeGain(d, nt, ns);
-    else if (op === "fir-frequency") r = A.freqFilter(d, nt, ns, params.type, params.lo * 1e6, params.hi * 1e6, params.sampleRate || 1e9);
-    else if (op === "fir-wavenumber" || op === "fk-filter" || op === "kl-filter") r = A.slidingBackground(d, nt, ns, params.width || 9, op === "kl-filter" ? "retain" : "remove");
+    else if (op === "agc") r = A.agc(d, nt, ns, { ...params, dtNs: axes.dtNs, windowNs: params.windowNs ?? params.window });
+    else if (op === "gagc") r = A.gagc(d, nt, ns, { ...params, dtNs: axes.dtNs, windowNs: params.windowNs ?? params.window });
+    else if (op === "power-gain") r = A.powerGain(d, nt, ns, { ...params, dtNs: axes.dtNs });
+    else if (op === "amplitude-gain") r = A.amplitudeGain(d, nt, ns, { ...params, dtNs: axes.dtNs });
+    else if (op === "fir-frequency") r = A.freqFilter(d, nt, ns, params.type, (params.lo ?? 20) * 1e6, (params.hi ?? 200) * 1e6, { dtNs: axes.dtNs });
+    else if (op === "fir-wavenumber") r = A.kFilter(d, nt, ns, params.type, params.loK ?? params.lo ?? 0.2, params.hiK ?? params.hi ?? 5, axes.dxM);
+    else if (op === "fk-filter") r = A.fkFilter(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
+    else if (op === "kl-filter") r = A.slidingBackground(d, nt, ns, params.width || 9, "retain");
     else if (op === "stolt" || op === "gazdag" || op === "pspi" || op === "split-step") r = A.simpleMigration(d, nt, ns, params.velocity, params.dt, params.dx);
     else if (op === "time-depth") r = A.timeDepth(d, nt, ns, params.velocity, params.dt, params.dz);
-    else if (op === "instantaneous") r = A.instantaneous(d, nt, ns, params.attr);
+    else if (op === "instantaneous") r = A.instantaneous(d, nt, ns, { ...params, dtNs: axes.dtNs });
     else if (op === "centroid") r = A.centroidFrequency(d, nt, ns);
     else if (op === "geology-model") r = A.geologicModel(d, nt, ns, params);
     else throw new Error("该功能已建立入口，算法将在下一阶段补全。");
+    r = withUpdatedMeta(r, dataset, params);
     const transfers = r.data?.buffer ? [r.data.buffer] : [];
     if (r.modelData?.buffer) transfers.push(r.modelData.buffer);
     self.postMessage({ id, ok: true, result: r }, transfers);

@@ -5,6 +5,10 @@
   "scripts": {
     "dev": "node server.mjs",
     "build": "node scripts/build-static.mjs",
-    "preview": "node server.mjs"
+    "preview": "node server.mjs",
+    "verify": "node scripts/verify-matgpr-algorithms.mjs"
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0"
   }
 }

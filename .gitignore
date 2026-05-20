@@ -1,3 +1,8 @@
 dist/
+node_modules/
+analysis_outputs/
+headless_output/
+headless-process.mjs
+本地部署.png
 *.log
 *.zip

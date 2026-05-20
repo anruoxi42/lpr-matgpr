@@ -22,6 +22,7 @@
         <button>数据</button>
         <div class="menu">
           <button data-action="open-import">数据导入</button>
+          <button data-page="data-manager">数据管理</button>
           <button data-action="hold-output">Hold Processed Data</button>
           <button data-action="discard-output">Discard Processed Data</button>
           <button data-action="open-undo">Undo / Restore</button>
@@ -238,6 +239,37 @@
             <button data-export="bin">Float32 BIN</button>
             <button data-export="png">PNG</button>
             <button data-export="pdf">PDF</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-data-manager" class="page data-manager-page">
+        <div class="data-manager-head">
+          <h2>数据管理</h2>
+          <span id="data-manager-count">0 个数据集</span>
+        </div>
+        <div class="data-manager-actions">
+          <span id="data-manager-selection" class="muted">未选择数据</span>
+          <button id="data-merge-export" data-action="data-merge-export" disabled>合并导出 .2B</button>
+          <button id="data-clear-selection" data-action="data-clear-selection" disabled>清空选择</button>
+        </div>
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="data-select-col"></th>
+                <th>名称</th>
+                <th>道数</th>
+                <th>样点数</th>
+                <th>上传时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="data-manager-body"></tbody>
+          </table>
+          <div id="data-manager-empty" class="data-empty">
+            <div class="data-empty-icon"></div>
+            <div>暂无数据</div>
           </div>
         </div>
       </section>

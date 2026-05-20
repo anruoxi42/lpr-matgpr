@@ -1,5 +1,32 @@
 export const RECORD_SIZE = 8307;
 export const SAMPLES_PER_TRACE = 2048;
+export const DEFAULT_DT_NS = 0.625;
+export const DEFAULT_DX_M = 0.05;
+
+function buildAxis(count, step, offset = 0) {
+  const axis = new Float32Array(count);
+  for (let i = 0; i < count; i++) axis[i] = offset + i * step;
+  return axis;
+}
+
+function median(values) {
+  const clean = values.filter(v => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  return clean.length ? clean[Math.floor(clean.length / 2)] : NaN;
+}
+
+function deriveDistanceAxis(meta, numTraces) {
+  const axis = new Float32Array(numTraces);
+  const steps = [];
+  for (let i = 1; i < numTraces; i++) {
+    const dx = meta.posX[i] - meta.posX[i - 1];
+    const dy = meta.posY[i] - meta.posY[i - 1];
+    const dz = meta.posZ[i] - meta.posZ[i - 1];
+    const dist = Math.hypot(dx, dy, dz);
+    axis[i] = axis[i - 1] + (Number.isFinite(dist) && dist > 0 ? dist : DEFAULT_DX_M);
+    if (Number.isFinite(dist) && dist > 0) steps.push(dist);
+  }
+  return { axis, dxM: median(steps) || DEFAULT_DX_M };
+}
 
 export function parse2BFile(arrayBuffer) {
   const view = new DataView(arrayBuffer);
@@ -39,6 +66,18 @@ export function parse2BFile(arrayBuffer) {
     const dOff = ro + 114;
     for (let j = 0; j < SAMPLES_PER_TRACE; j++) data[i * SAMPLES_PER_TRACE + j] = view.getFloat32(dOff + j * 4, true);
   }
+  const distance = deriveDistanceAxis(meta, numTraces);
+  meta.dtNs = DEFAULT_DT_NS;
+  meta.sampleRateHz = 1 / (DEFAULT_DT_NS * 1e-9);
+  meta.timeAxisNs = buildAxis(SAMPLES_PER_TRACE, DEFAULT_DT_NS);
+  meta.tt2w = meta.timeAxisNs;
+  meta.dxM = distance.dxM;
+  meta.distanceAxisM = distance.axis;
+  meta.x = meta.distanceAxisM;
+  meta.xyz = {
+    Tx: { x: meta.posX, y: meta.posY, z: meta.posZ },
+    Rx: { x: meta.posX, y: meta.posY, z: meta.posZ }
+  };
   return { data, meta, numTraces, numSamples: SAMPLES_PER_TRACE };
 }
 
@@ -84,6 +123,8 @@ export function summarizeMeta(meta = {}) {
     sourceFormat: meta.sourceFormat || ".2B",
     firstTimestamp: meta.timestamp?.[0] || 0,
     firstPosition: [meta.posX?.[0] || 0, meta.posY?.[0] || 0, meta.posZ?.[0] || 0],
+    dtNs: meta.dtNs || DEFAULT_DT_NS,
+    dxM: meta.dxM || DEFAULT_DX_M,
     remainder: meta.remainder || 0
   };
 }

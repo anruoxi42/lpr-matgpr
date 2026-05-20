@@ -1,6 +1,6 @@
-import { parse2BFile, write2BFile, writeMgpJson, writeSEGYLike, writeSEGYFile, writeDZTFile } from "./io/twoB.js";
+import { RECORD_SIZE, SAMPLES_PER_TRACE, parse2BFile, write2BFile, writeMgpJson, writeSEGYLike, writeSEGYFile, writeDZTFile } from "./io/twoB.js";
 import { IpdStore } from "./processing/ipdStore.js";
-import { spectrum } from "./processing/algorithms.js";
+import { spectrum, fkSpectrum } from "./processing/algorithms.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
 
 const store = new IpdStore();
@@ -15,6 +15,10 @@ let radarSelections = [];
 let radarAnnotations = [];
 let lastMergedSelection = null;
 let geologyResult = null;
+let dataManagerSelection = new Set();
+let velocityRenderer = null;
+let velocityPreviewPoint = null;
+let velocityFixedPoint = null;
 
 const $ = sel => document.querySelector(sel);
 const $$ = sel => [...document.querySelectorAll(sel)];
@@ -82,11 +86,13 @@ function refresh() {
   $("#state-panel").innerHTML = store.ipd ? [
     row("Current", `${store.current.numTraces} 道 × ${store.current.numSamples} 样点`),
     row("Output", store.output ? `${store.output.numTraces} 道 × ${store.output.numSamples} 样点，待验收` : "无"),
+    row("dt / dx", `${(store.current.meta?.dtNs || store.current.dtNs || 0.625).toFixed?.(4) || store.current.meta?.dtNs || 0.625} ns · ${(store.current.meta?.dxM || store.current.dxM || 0.05).toFixed?.(4) || store.current.meta?.dxM || 0.05} m`),
     row("历史", `${store.ipd.history.length} 步`),
     row("格式", store.current.meta?.sourceFormat || ".2B")
   ].join("") : "暂无数据";
   $("#history-panel").innerHTML = store.ipd?.history.length ? store.ipd.history.map((h, i) => `<div class="history-item"><b>${i + 1}. ${h.name}</b><br><span>${h.createdAt || ""}</span><br><code>${JSON.stringify(h.params || {})}</code></div>`).join("") : "暂无历史";
   updateVelocityList();
+  renderDataManager();
   renderThree();
 }
 function row(k, v) { return `<div><span class="muted">${k}</span><br><b>${v}</b></div>`; }
@@ -110,29 +116,29 @@ async function importFiles(files) {
 }
 
 const processDefs = {
-  "signal-position": ["调整信号位置", [{ id: "shift", label: "向上移动样点数", value: 0 }]],
+  "signal-position": ["调整信号位置", [{ id: "shift", label: "裁剪零点前样点数", value: 0 }]],
   "trim-time": ["定时窗口", [{ id: "start", label: "起始样点", value: 0 }, { id: "end", label: "结束样点", value: 1023 }]],
   "bad-traces": ["删除不良痕迹", [{ id: "ranges", label: "坏道范围，例如 5-9,22", value: "" }]],
   "remove-dc": ["去均值 Remove DC", []],
-  "dewow": ["去低频 Dewow", [{ id: "cutoff", label: "高通截止 MHz", value: 20 }, { id: "sampleRate", label: "采样率 Hz", value: 1e9 }]],
+  "dewow": ["去低频 Dewow", []],
   "dzt-gain": ["Remove DZT header gain", []],
   "equalize": ["均衡轨迹", []],
-  "resample-time": ["重采样时间轴", [{ id: "samples", label: "新样点数", value: 2048 }]],
-  "resample-scan": ["重采样扫描轴", [{ id: "traces", label: "新道数", value: 512 }]],
-  "equal-spacing": ["转换为等间距", [{ id: "traces", label: "等间距道数", value: 512 }]],
-  agc: ["Standard AGC", [{ id: "window", label: "RMS 窗口样点", value: 50 }]],
-  gagc: ["Gaussian-tapered AGC", [{ id: "window", label: "高斯窗口样点", value: 50 }]],
-  "power-gain": ["Inverse Power Decay", [{ id: "power", label: "幂次", value: 1.5 }]],
-  "amplitude-gain": ["Inverse Amplitude Decay", []],
+  "resample-time": ["重采样时间轴", [{ id: "samples", label: "新样点数", value: 2048 }, { id: "dtNs", label: "当前 dt (ns)", value: 0.625 }, { id: "order", label: "sinc 半阶", value: 15 }]],
+  "resample-scan": ["重采样扫描轴", [{ id: "traces", label: "新道数", value: 512 }, { id: "dxM", label: "当前 dx (m)", value: 0.05 }, { id: "order", label: "sinc 半阶", value: 15 }]],
+  "equal-spacing": ["转换为等间距", [{ id: "traces", label: "等间距道数", value: 512 }, { id: "dxM", label: "当前 dx (m)", value: 0.05 }, { id: "order", label: "sinc 半阶", value: 15 }]],
+  agc: ["Standard AGC", [{ id: "windowNs", label: "AGC 窗口 (ns)", value: 31.25 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  gagc: ["Gaussian-tapered AGC", [{ id: "windowNs", label: "AGC 窗口 (ns)", value: 31.25 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }, { id: "eps", label: "EPS", value: 5e-7 }]],
+  "power-gain": ["Inverse Power Decay", [{ id: "power", label: "幂次 auto 或数字", value: "auto" }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  "amplitude-gain": ["Inverse Amplitude Decay", [{ id: "curve", label: "衰减曲线 median/mean", value: "median" }, { id: "order", label: "多指数阶数", value: 3 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
   "global-bg": ["Remove Global Background", []],
   horizontal: ["Suppress Horizontal Features", [{ id: "width", label: "滑动窗口道数", value: 25 }]],
   dipping: ["Suppress Dipping Features", [{ id: "width", label: "滑动窗口道数", value: 25 }]],
-  "fir-frequency": ["FIR Frequency Filter", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "lo", label: "低频 MHz", value: 20 }, { id: "hi", label: "高频 MHz", value: 200 }, { id: "sampleRate", label: "采样率 Hz", value: 1e9 }]],
-  "fir-wavenumber": ["FIR Wavenumber Filter", [{ id: "width", label: "空间窗口道数", value: 9 }]],
-  "fk-filter": ["F-K Filter", [{ id: "width", label: "简化窗口道数", value: 9 }]],
+  "fir-frequency": ["FIR Frequency Filter", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "lo", label: "低频 MHz", value: 20 }, { id: "hi", label: "高频 MHz", value: 200 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  "fir-wavenumber": ["FIR Wavenumber Filter", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "loK", label: "低波数 m^-1", value: 0.2 }, { id: "hiK", label: "高波数 m^-1", value: 5 }, { id: "dxM", label: "dx (m)", value: 0.05 }]],
+  "fk-filter": ["F-K Filter", []],
   "kl-filter": ["Karhunen-Loeve Filter", [{ id: "width", label: "主成分近似窗口", value: 9 }]],
   "advanced-placeholder": ["Curvelet / Wavelet / Tau-P / F-X", []],
-  instantaneous: ["瞬时属性", [{ id: "attr", label: "属性 amplitude/phase/frequency", value: "amplitude" }]],
+  instantaneous: ["瞬时属性", [{ id: "attr", label: "属性 amplitude/atan/atan2/unwrapped/ifreq", value: "amplitude" }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
   stolt: ["1-D F-K / Stolt Migration", [{ id: "velocity", label: "速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }]],
   gazdag: ["1-D Phase-shift / Gazdag", [{ id: "velocity", label: "速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }]],
   "time-depth": ["Time-to-Depth Conversion", [{ id: "velocity", label: "速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dz", label: "深度采样 m", value: .02 }]],
@@ -142,14 +148,24 @@ const processDefs = {
 
 function openProcess(op) {
   if (!store.current) return toast("请先导入 .2B 数据", "warn");
+  if (op === "fk-filter") return openFkDesigner();
   const [title, fields] = processDefs[op] || [op, []];
+  const fieldValue = f => {
+    const ds = store.current;
+    if (f.id === "dtNs") return ds.meta?.dtNs || ds.dtNs || f.value;
+    if (f.id === "dxM") return ds.meta?.dxM || ds.dxM || f.value;
+    if (f.id === "samples") return ds.numSamples;
+    if (f.id === "traces") return ds.numTraces;
+    if (f.id === "end") return ds.numSamples - 1;
+    return f.value;
+  };
   $("#process-title").textContent = title;
-  $("#process-fields").innerHTML = fields.length ? fields.map(f => `<label>${f.label}<input data-field="${f.id}" value="${f.value}"></label>`).join("") : `<p class="muted">无需额外参数。执行后生成 Output Data，需要 Hold 才会成为 Current Input Data。</p>`;
+  $("#process-fields").innerHTML = fields.length ? fields.map(f => `<label>${f.label}<input data-field="${f.id}" value="${fieldValue(f)}"></label>`).join("") : `<p class="muted">无需额外参数。执行后生成 Output Data，需要 Hold 才会成为 Current Input Data。</p>`;
   $("#run-process").onclick = async ev => {
     ev.preventDefault();
     try {
       const params = {};
-      $$("[data-field]").forEach(i => params[i.dataset.field] = isNaN(Number(i.value)) || i.dataset.field === "type" || i.dataset.field === "ranges" ? i.value : Number(i.value));
+      $$("[data-field]").forEach(i => params[i.dataset.field] = isNaN(Number(i.value)) || ["type", "ranges", "curve", "attr", "power"].includes(i.dataset.field) ? i.value : Number(i.value));
       $("#process-dialog").close();
       $("#footer-status").textContent = `正在执行 ${title}`;
       if (op === "dzt-gain" || op === "advanced-placeholder") return toast("该功能入口已新增，算法将在下一阶段接入。", "warn");
@@ -166,9 +182,204 @@ function openProcess(op) {
   $("#process-dialog").showModal();
 }
 
+function ensureFkDialog() {
+  let dlg = $("#fk-dialog");
+  if (dlg) return dlg;
+  dlg = document.createElement("dialog");
+  dlg.id = "fk-dialog";
+  dlg.className = "wide-dialog";
+  dlg.innerHTML = `
+    <form method="dialog">
+      <h2>F-K Filter Designer</h2>
+      <div class="fk-layout">
+        <div class="fk-canvas-wrap"><canvas id="fk-canvas"></canvas></div>
+        <div class="fk-controls">
+          <label>dt (ns)<input id="fk-dt" type="number" step="0.0001"></label>
+          <label>dx (m)<input id="fk-dx" type="number" step="0.001"></label>
+          <label>模式
+            <select id="fk-mode">
+              <option value="polygon">Polygon zone</option>
+              <option value="velocity-fan">Velocity fan</option>
+              <option value="up-dip">Up-dip</option>
+              <option value="down-dip">Down-dip</option>
+            </select>
+          </label>
+          <label>动作
+            <select id="fk-action">
+              <option value="pass">Pass</option>
+              <option value="stop">Stop</option>
+            </select>
+          </label>
+          <label>速度下限 (m/ns)<input id="fk-vmin" type="number" value="0.03" step="0.005"></label>
+          <label>速度上限 (m/ns)<input id="fk-vmax" type="number" value="0.30" step="0.005"></label>
+          <div id="fk-readout" class="muted">点击谱图添加多边形顶点，拖动顶点可调整。</div>
+          <div class="button-row">
+            <button id="fk-clear" value="cancel" type="button">清空多边形</button>
+            <button id="fk-apply" value="default" class="primary" type="button">Apply to Output</button>
+          </div>
+        </div>
+      </div>
+      <menu>
+        <button value="cancel">关闭</button>
+      </menu>
+    </form>`;
+  document.body.appendChild(dlg);
+  return dlg;
+}
+
+function openFkDesigner() {
+  const ds = store.current;
+  if (!ds) return toast("请先导入 .2B 数据", "warn");
+  const dlg = ensureFkDialog();
+  const cv = $("#fk-canvas");
+  const dt = ds.meta?.dtNs || ds.dtNs || 0.625;
+  const dx = ds.meta?.dxM || ds.dxM || 0.05;
+  $("#fk-dt").value = dt;
+  $("#fk-dx").value = dx;
+  let spec = null;
+  let points = [];
+  let drag = -1;
+  const canvasPoint = e => {
+    const r = cv.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  const toPhysical = p => {
+    const w = cv.clientWidth || 1, h = cv.clientHeight || 1;
+    return {
+      k: (p.x / w * 2 - 1) * spec.kMax,
+      f: (1 - p.y / h) * spec.fMaxGHz
+    };
+  };
+  const toCanvas = p => {
+    const w = cv.clientWidth || 1, h = cv.clientHeight || 1;
+    return {
+      x: (p.k / spec.kMax + 1) * 0.5 * w,
+      y: (1 - p.f / spec.fMaxGHz) * h
+    };
+  };
+  const nearestPoint = p => {
+    let best = -1, bd = 14;
+    points.forEach((pt, i) => {
+      const q = toCanvas(pt), d = Math.hypot(q.x - p.x, q.y - p.y);
+      if (d < bd) { bd = d; best = i; }
+    });
+    return best;
+  };
+  const draw = () => {
+    const rect = cv.parentElement.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+    const w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
+    cv.width = w * dpr; cv.height = h * dpr; cv.style.width = `${w}px`; cv.style.height = `${h}px`;
+    const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.fillStyle = "#080c14"; ctx.fillRect(0,0,w,h);
+    if (spec) {
+      const img = ctx.createImageData(w, h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const sx = Math.min(spec.width - 1, Math.floor(x / w * spec.width));
+        const sy = Math.min(spec.height - 1, Math.floor(spec.height / 2 + (1 - y / h) * (spec.height / 2 - 1)));
+        const v = Math.max(0, Math.min(255, Math.round((spec.values[sy * spec.width + sx] || 0) * 255)));
+        const i = (y * w + x) * 4;
+        img.data[i] = v; img.data[i + 1] = Math.min(255, v + 25); img.data[i + 2] = 255 - Math.floor(v * 0.4); img.data[i + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+    ctx.strokeStyle = "rgba(255,255,255,.45)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h); ctx.moveTo(0, h - 1); ctx.lineTo(w, h - 1); ctx.stroke();
+    if (!spec) return;
+    const mode = $("#fk-mode").value;
+    if (mode === "polygon" && points.length) {
+      ctx.strokeStyle = "#fff200"; ctx.fillStyle = "rgba(255,242,0,.12)"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      points.forEach((pt, i) => {
+        const q = toCanvas(pt);
+        i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y);
+      });
+      if (points.length >= 3) ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      for (const pt of points) {
+        const q = toCanvas(pt);
+        ctx.beginPath(); ctx.arc(q.x, q.y, 5, 0, Math.PI * 2); ctx.fillStyle = "#fff200"; ctx.fill();
+      }
+    } else if (mode === "velocity-fan") {
+      const vmin = Number($("#fk-vmin").value || 0.03), vmax = Number($("#fk-vmax").value || 0.3);
+      ctx.strokeStyle = "#fff200"; ctx.lineWidth = 2;
+      for (const v of [vmin, vmax, -vmin, -vmax]) {
+        const kEdge = Math.sign(v) * Math.min(spec?.kMax || 1, (spec?.fMaxGHz || 1) / Math.abs(v));
+        const a = toCanvas({ k: 0, f: 0 }), b = toCanvas({ k: kEdge, f: Math.abs(kEdge * v) });
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    } else if (mode === "up-dip" || mode === "down-dip") {
+      ctx.strokeStyle = "#fff200"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (mode === "up-dip") { ctx.moveTo(0, 0); ctx.lineTo(w, h); }
+      else { ctx.moveTo(w, 0); ctx.lineTo(0, h); }
+      ctx.stroke();
+    }
+  };
+  const redraw = () => requestAnimationFrame(draw);
+  cv.onmousedown = e => {
+    if (!spec || $("#fk-mode").value !== "polygon") return;
+    const p = canvasPoint(e);
+    drag = nearestPoint(p);
+    if (drag < 0) { points.push(toPhysical(p)); drag = points.length - 1; }
+    addEventListener("mouseup", () => { drag = -1; }, { once: true });
+    redraw();
+  };
+  cv.onmousemove = e => {
+    if (!spec) return;
+    const p = canvasPoint(e), phys = toPhysical(p);
+    $("#fk-readout").textContent = `k=${phys.k.toFixed(3)} m^-1 · f=${phys.f.toFixed(3)} GHz · ${points.length} vertices`;
+    if (drag >= 0) { points[drag] = toPhysical(p); redraw(); }
+  };
+  cv.oncontextmenu = e => {
+    e.preventDefault();
+    const i = nearestPoint(canvasPoint(e));
+    if (i >= 0) points.splice(i, 1);
+    redraw();
+  };
+  $("#fk-clear").onclick = () => { points = []; redraw(); };
+  ["fk-mode","fk-action","fk-vmin","fk-vmax"].forEach(id => $(`#${id}`).oninput = redraw);
+  $("#fk-apply").onclick = async () => {
+    try {
+      const params = {
+        dtNs: Number($("#fk-dt").value || dt),
+        dxM: Number($("#fk-dx").value || dx),
+        mode: $("#fk-mode").value,
+        action: $("#fk-action").value,
+        polygon: points,
+        velocityRange: { min: Number($("#fk-vmin").value || 0.03), max: Number($("#fk-vmax").value || 0.3) }
+      };
+      if (params.mode === "polygon" && params.polygon.length < 3) return toast("多边形模式至少需要 3 个顶点", "warn");
+      dlg.close();
+      $("#footer-status").textContent = "正在执行 F-K Filter";
+      const result = await runWorker("fk-filter", store.current, params);
+      store.setOutput({ ...result, name: `${store.current.name}_fk-filter` }, { name: "F-K Filter", op: "fk-filter", params });
+      displaySource = "output"; $("#display-mode").value = "output";
+      $("#footer-status").textContent = "Output Data 已生成，等待 Hold/Discard";
+      toast("F-K Filter 完成，请验收 Output Data");
+    } catch (error) {
+      toast(error.message, "err");
+      $("#footer-status").textContent = "F-K Filter 失败";
+    }
+  };
+  dlg.showModal();
+  $("#footer-status").textContent = "正在计算 F-K 谱图";
+  setTimeout(() => {
+    try {
+      spec = fkSpectrum(ds.data, ds.numTraces, ds.numSamples, Number($("#fk-dt").value || dt), Number($("#fk-dx").value || dx), 256);
+      $("#footer-status").textContent = "F-K 设计器就绪";
+      draw();
+    } catch (error) {
+      toast(error.message, "err");
+      $("#footer-status").textContent = "F-K 谱图计算失败";
+    }
+  });
+}
+
 function switchPage(name) {
   $$(".page").forEach(p => p.classList.remove("active"));
   $(`#page-${name}`)?.classList.add("active");
+  if (name === "data-manager") renderDataManager();
   if (name === "velocity") renderVelocity();
   if (name === "model") renderModel();
   if (name === "three") renderThree();
@@ -216,30 +427,93 @@ function drawSpectrum(mean = false) {
 function renderVelocity() {
   const ds = currentDisplayed(), cv = $("#velocity-canvas");
   if (!ds) return;
-  const rr = new RadarRenderer(cv, cv.parentElement);
+  if (!velocityRenderer || velocityRenderer.canvas !== cv) velocityRenderer = new RadarRenderer(cv, cv.parentElement);
+  const rr = velocityRenderer;
   rr.setDataset(ds);
-  const redraw = () => {
-    rr.setDataset(ds);
-    const p = rr.plot(), ctx = rr.ctx;
-    const v = Number($("#vel-v").value), x0 = Number($("#vel-x0").value), z0 = Number($("#vel-z0").value), dx = Number($("#vel-dx").value), dt = Number($("#vel-dt").value);
-    const alpha = 2 * dx / Math.max(v * dt, 1e-9);
-    ctx.strokeStyle = "rgba(255,255,255,.92)"; ctx.lineWidth = 2; ctx.setLineDash([7, 4]); ctx.beginPath();
-    let started = false;
-    for (let t = 0; t < ds.numTraces; t++) {
-      const s = Math.sqrt(z0 * z0 + alpha * alpha * (t - x0) ** 2);
-      if (s < 0 || s >= ds.numSamples) continue;
-      const x = p.x + (t - rr.view.t0) / (rr.view.t1 - rr.view.t0) * p.w;
-      const y = p.y + (s - rr.view.s0) / (rr.view.s1 - rr.view.s0) * p.h;
-      started ? ctx.lineTo(x, y) : ctx.moveTo(x, y); started = true;
-    }
-    ctx.stroke(); ctx.setLineDash([]);
+  let redrawFrame = 0;
+  const currentParams = point => ({
+    v: Number($("#vel-v").value),
+    x0: point?.x0 ?? Number($("#vel-x0").value),
+    z0: point?.z0 ?? Number($("#vel-z0").value),
+    dx: Number($("#vel-dx").value),
+    dt: Number($("#vel-dt").value)
+  });
+  const drawHyperbola = (point, opts = {}) => {
+    if (!point || !rr.view) return;
+    const p = rr.plot(), ctx = rr.ctx, params = currentParams(point);
+    const alpha = 2 * params.dx / Math.max(params.v * params.dt, 1e-9);
+    const color = opts.color || "#fff200";
+    const startT = Math.max(0, Math.floor(rr.view.t0));
+    const endT = Math.min(ds.numTraces - 1, Math.ceil(rr.view.t1));
+    const strokePath = () => {
+      ctx.beginPath();
+      let started = false;
+      for (let t = startT; t <= endT; t++) {
+        const s = Math.sqrt(params.z0 * params.z0 + alpha * alpha * (t - params.x0) ** 2);
+        if (s < rr.view.s0 || s > rr.view.s1 || s < 0 || s >= ds.numSamples) continue;
+        const x = p.x + (t - rr.view.t0) / (rr.view.t1 - rr.view.t0) * p.w;
+        const y = p.y + (s - rr.view.s0) / (rr.view.s1 - rr.view.s0) * p.h;
+        started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        started = true;
+      }
+      if (started) ctx.stroke();
+    };
+    ctx.save();
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.setLineDash(opts.dashed ? [8, 5] : []);
+    ctx.strokeStyle = "rgba(2,8,18,.9)";
+    ctx.lineWidth = (opts.width || 3) + 3;
+    strokePath();
+    ctx.shadowColor = color;
+    ctx.shadowBlur = opts.glow ?? 12;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = opts.width || 3;
+    strokePath();
+    ctx.restore();
   };
+  const redraw = () => {
+    rr.render();
+    const inputPoint = { x0: Number($("#vel-x0").value), z0: Number($("#vel-z0").value) };
+    if (velocityFixedPoint) drawHyperbola(velocityFixedPoint, { color: "#fff200", width: 3.4, glow: 14 });
+    if (velocityPreviewPoint) drawHyperbola(velocityPreviewPoint, { color: "#00f5ff", width: 2.8, glow: 10, dashed: true });
+    if (!velocityFixedPoint && !velocityPreviewPoint) drawHyperbola(inputPoint, { color: "#fff200", width: 3.2, glow: 12 });
+  };
+  const scheduleRedraw = () => {
+    cancelAnimationFrame(redrawFrame);
+    redrawFrame = requestAnimationFrame(redraw);
+  };
+  cv.onmousemove = e => {
+    const r = cv.getBoundingClientRect(), d = rr.dataAt(e.clientX - r.left, e.clientY - r.top);
+    if (!d) return;
+    velocityPreviewPoint = { x0: d.t, z0: d.s };
+    scheduleRedraw();
+  };
+  cv.onmouseleave = () => { velocityPreviewPoint = null; scheduleRedraw(); };
   cv.onclick = e => {
     const r = cv.getBoundingClientRect(), d = rr.dataAt(e.clientX - r.left, e.clientY - r.top);
-    if (d) { $("#vel-x0").value = d.t; $("#vel-z0").value = d.s; redraw(); }
+    if (d) {
+      velocityFixedPoint = { x0: d.t, z0: d.s };
+      velocityPreviewPoint = null;
+      $("#vel-x0").value = d.t;
+      $("#vel-z0").value = d.s;
+      redraw();
+    }
   };
-  cv.onwheel = e => { e.preventDefault(); $("#vel-v").value = Math.max(.03, Math.min(.3, Number($("#vel-v").value) + (e.deltaY > 0 ? -.002 : .002))).toFixed(3); redraw(); };
-  ["vel-v","vel-x0","vel-z0","vel-dx","vel-dt"].forEach(id => $(`#${id}`).oninput = redraw);
+  cv.__velocityWheelRedraw = redraw;
+  if (!cv.__velocityWheelBound) {
+    cv.addEventListener("wheel", e => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      $("#vel-v").value = Math.max(.03, Math.min(.3, Number($("#vel-v").value) + (e.deltaY > 0 ? -.002 : .002))).toFixed(3);
+      cv.__velocityWheelRedraw?.();
+    }, { capture: true, passive: false });
+    cv.__velocityWheelBound = true;
+  }
+  ["vel-v","vel-x0","vel-z0","vel-dx","vel-dt"].forEach(id => $(`#${id}`).oninput = () => {
+    if (id === "vel-x0" || id === "vel-z0") velocityFixedPoint = { x0: Number($("#vel-x0").value), z0: Number($("#vel-z0").value) };
+    redraw();
+  });
   redraw();
 }
 function updateVelocityList() {
@@ -316,6 +590,108 @@ function setRadarMode(mode) {
   radar.setMode(mode);
   $$("[data-radar-mode]").forEach(btn => btn.classList.toggle("active", btn.dataset.radarMode === radar.mode));
 }
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+function dataFileName(name, ext = ".2b") {
+  const clean = String(name || "data").trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\.\w+$/i, "");
+  return `${clean || "data"}${ext}`;
+}
+function renderDataManager() {
+  const body = $("#data-manager-body");
+  if (!body) return;
+  const items = store.managedDatasets || [];
+  const ids = new Set(items.map(item => item.id));
+  for (const id of [...dataManagerSelection]) if (!ids.has(id)) dataManagerSelection.delete(id);
+  const selectedItems = items.filter(item => dataManagerSelection.has(item.id));
+  $("#data-manager-count").textContent = `${items.length} 个数据集`;
+  $("#data-manager-empty").classList.toggle("hidden", items.length > 0);
+  $("#data-manager-selection").textContent = selectedItems.length ? `已选择 ${selectedItems.length} 个数据集，共 ${selectedItems.reduce((sum, item) => sum + item.numTraces, 0)} 道` : "未选择数据";
+  $("#data-merge-export").disabled = selectedItems.length < 2;
+  $("#data-clear-selection").disabled = selectedItems.length === 0;
+  body.innerHTML = items.map(item => {
+    const can2B = item.numSamples === SAMPLES_PER_TRACE;
+    const checked = dataManagerSelection.has(item.id) ? "checked" : "";
+    const disabled = can2B ? "" : "disabled";
+    const status = item.managedStatus ? `<span class="data-status">${escapeHtml(item.managedStatus)}</span>` : "";
+    return `<tr class="${item.isCurrent ? "current" : ""}">
+      <td><input type="checkbox" data-data-select="${item.id}" ${checked} ${disabled} title="${can2B ? "选择合并导出" : "样点数不是 2048，不能合并导出 .2B"}"></td>
+      <td class="data-name-cell"><div class="data-name-main"><button data-data-use="${item.id}" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</button><span class="data-tag">${escapeHtml(item.managedKind || "数据")}</span>${status}</div></td>
+      <td>${item.numTraces}</td>
+      <td>${item.numSamples}</td>
+      <td>${escapeHtml(item.managedCreatedAt || item.loadedAt || "")}</td>
+      <td><div class="data-actions-cell">
+        <button data-data-use="${item.id}">设为当前</button>
+        <button data-data-rename="${item.id}">重命名</button>
+        <button data-data-export="${item.id}" ${can2B ? "" : "disabled"}>导出 .2B</button>
+      </div></td>
+    </tr>`;
+  }).join("");
+}
+function useManagedDataset(id) {
+  if (!store.useManagedDataset(id)) return toast("没有找到该数据集", "warn");
+  displaySource = "current";
+  $("#display-mode").value = "current";
+  clearInteractionState();
+  switchPage("radar");
+  toast("已切换为当前数据");
+}
+function renameManagedDataset(id) {
+  const item = store.getManagedDataset(id);
+  if (!item) return toast("没有找到该数据集", "warn");
+  const name = prompt("数据集名称", item.name || "data");
+  if (name == null) return;
+  store.renameManagedDataset(id, name) ? toast("名称已更新") : toast("名称不能为空", "warn");
+}
+function exportManagedDataset(id) {
+  const item = store.getManagedDataset(id);
+  if (!item) return toast("没有找到该数据集", "warn");
+  if (item.numSamples !== SAMPLES_PER_TRACE) return toast(".2B 导出要求每道 2048 样点", "warn");
+  download(write2BFile(item), dataFileName(item.name));
+  toast("导出完成");
+}
+function mergeSelectedManagedDatasets() {
+  const selected = (store.managedDatasets || []).filter(item => dataManagerSelection.has(item.id));
+  if (selected.length < 2) return toast("请至少选择两个 .2B 数据集", "warn");
+  if (selected.some(item => item.numSamples !== SAMPLES_PER_TRACE)) return toast("只能合并每道 2048 样点的 .2B 数据集", "warn");
+  const merged = merge2BDatasets(selected);
+  download(write2BFile(merged), merged.name);
+  toast(`已合并导出 ${selected.length} 个数据集，共 ${merged.numTraces} 道`);
+}
+function merge2BDatasets(datasets) {
+  const numTraces = datasets.reduce((sum, ds) => sum + ds.numTraces, 0);
+  const data = new Float32Array(numTraces * SAMPLES_PER_TRACE);
+  let traceOffset = 0;
+  for (const ds of datasets) {
+    data.set(ds.data.subarray(0, ds.numTraces * SAMPLES_PER_TRACE), traceOffset * SAMPLES_PER_TRACE);
+    traceOffset += ds.numTraces;
+  }
+  return {
+    data,
+    meta: mergeMetaArrays(datasets, numTraces),
+    numTraces,
+    numSamples: SAMPLES_PER_TRACE,
+    name: `merged_${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}.2b`,
+    fileSize: numTraces * RECORD_SIZE
+  };
+}
+function mergeMetaArrays(datasets, numTraces) {
+  const out = { sourceFormat: ".2B" };
+  const keys = ["antennaId","timestamp","velocity","posX","posY","posZ","attX","attY","attZ","validLen","quality"];
+  for (const key of keys) {
+    const first = datasets.find(ds => ds.meta?.[key])?.meta?.[key];
+    if (!first) continue;
+    const arr = new first.constructor(numTraces);
+    let offset = 0;
+    for (const ds of datasets) {
+      const src = ds.meta?.[key];
+      if (src) arr.set(src.subarray ? src.subarray(0, Math.min(src.length, ds.numTraces)) : src.slice(0, ds.numTraces), offset);
+      offset += ds.numTraces;
+    }
+    out[key] = arr;
+  }
+  return out;
+}
 function copyMeta(meta, indices) {
   if (!meta) return null;
   const out = {};
@@ -345,7 +721,7 @@ function datasetFromSelections(source, selections) {
     numTraces: indices.length,
     numSamples: source.numSamples,
     name: `${(source.name || "data").replace(/\.2b$/i, "")}_selection.2b`,
-    fileSize: indices.length * 8307
+    fileSize: indices.length * RECORD_SIZE
   };
 }
 function updateSelectionPanel() {
@@ -560,7 +936,7 @@ function exportData(kind) {
   const ds = $("#export-source").value === "output" && store.output ? store.output : store.current;
   if (!ds) return toast("无可导出数据", "warn");
   try {
-    if (kind === "2b") download(write2BFile(ds), `${ds.name || "data"}.2b`);
+    if (kind === "2b") download(write2BFile(ds), dataFileName(ds.name));
     else if (kind === "mgp") download(writeMgpJson(store.ipd), `${store.ipd.name}.mgp.json`);
     else if (kind === "depth") download(writeMgpJson({ ...store.ipd, current: ds }), `${store.ipd.name}_depth.json`);
     else if (kind === "segy") download(writeSEGYFile(ds, Number($("#export-dt")?.value || 0.001), Number($("#export-dx")?.value || 0.05)), `${(ds.name || "data").replace(/\.\w+$/i, "")}.sgy`);
@@ -582,6 +958,13 @@ function bindUi() {
   $("#drop-zone").ondrop = e => { e.preventDefault(); $("#drop-zone").classList.remove("over"); importFiles(e.dataTransfer.files); };
   document.body.addEventListener("click", e => {
     const action = e.target.dataset.action, page = e.target.dataset.page, proc = e.target.dataset.process, exp = e.target.dataset.export;
+    if (e.target.dataset.dataSelect) {
+      e.target.checked ? dataManagerSelection.add(e.target.dataset.dataSelect) : dataManagerSelection.delete(e.target.dataset.dataSelect);
+      renderDataManager();
+    }
+    if (e.target.dataset.dataUse) useManagedDataset(e.target.dataset.dataUse);
+    if (e.target.dataset.dataRename) renameManagedDataset(e.target.dataset.dataRename);
+    if (e.target.dataset.dataExport) exportManagedDataset(e.target.dataset.dataExport);
     if (page) switchPage(page);
     if (proc) openProcess(proc);
     if (exp) exportData(exp);
@@ -599,6 +982,8 @@ function bindUi() {
     if (action === "selection-clear") clearSelections();
     if (action === "selection-export-2b") exportSelection("2b");
     if (action === "selection-export-pdf") exportSelection("pdf");
+    if (action === "data-merge-export") mergeSelectedManagedDatasets();
+    if (action === "data-clear-selection") { dataManagerSelection.clear(); renderDataManager(); }
     if (action === "annotation-export") download(new Blob([JSON.stringify(radarAnnotations, null, 2)], { type: "application/json" }), "annotations.json");
     if (action === "annotation-clear") { radarAnnotations = []; updateAnnotationPanel(); }
     if (action === "run-geology") runGeologyModel();
