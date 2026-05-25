@@ -18,6 +18,7 @@ import {
   splitStepMigration,
   stoltMigration,
   gazdagMigration,
+  geologicModel,
   timeDepth
 } from "../src/processing/algorithms.js";
 import { parseHadText, parseHcdFile } from "../src/io/hcd.js";
@@ -175,6 +176,43 @@ finite(attenuation.data, "attenuation analysis");
 assert(attenuation.numTraces === 4 && attenuation.numSamples === ns, "attenuation analysis should return four curves");
 assert(Number.isFinite(attenuation.powerLaw[0]) && Number.isFinite(attenuation.powerLaw[1]), "invalid power-law fit");
 assert(Number.isFinite(attenuation.exponential[0]) && Number.isFinite(attenuation.exponential[1]), "invalid exponential fit");
+
+const geoNt = 80, geoNs = 220;
+const geoData = new Float32Array(geoNt * geoNs);
+function addGeoPulse(t, s0, amp) {
+  for (let k = -4; k <= 4; k++) {
+    const s = Math.round(s0 + k);
+    if (s < 0 || s >= geoNs) continue;
+    const x = k / 2;
+    geoData[t * geoNs + s] += amp * (1 - x * x) * Math.exp(-0.5 * x * x);
+  }
+}
+for (let t = 0; t < geoNt; t++) {
+  addGeoPulse(t, 62 + 4 * Math.sin(t / 9), 4);
+  addGeoPulse(t, 96 + 5 * Math.sin(t / 11 + 0.7), 5);
+  addGeoPulse(t, 132 + 4 * Math.sin(t / 13 + 1.1), 4.5);
+}
+const geo = geologicModel(geoData, geoNt, geoNs, {
+  dt: dtNs,
+  velocity: 0.1,
+  modelDepthMax: 6,
+  startDepth: 1.2,
+  endDepth: 5,
+  maxPeaksPerTrace: 4,
+  histPercentile: 0.55,
+  supportThreshold: 0.08,
+  maxHorizons: 4,
+  horizonMinGapM: 0.15,
+  preprocess: { dewow: false, dc: false, freqFilter: false, backgroundRemove: false, slidingBg: false },
+  gainMethod: "agc"
+});
+finite(geo.data, "geologic processed data");
+assert(geo.horizons.length >= 2, "geologic model should find ordered synthetic horizons");
+for (let i = 1; i < geo.horizons.length; i++) {
+  for (let t = 0; t < geoNt; t++) {
+    assert(geo.horizons[i].line[t] - geo.horizons[i - 1].line[t] >= 0.15, "geologic horizons must remain depth-ordered");
+  }
+}
 
 function arrayBufferFromNodeBuffer(buffer) {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);

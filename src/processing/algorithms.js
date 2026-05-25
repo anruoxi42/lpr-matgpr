@@ -1617,6 +1617,26 @@ function medianTyped(line) {
   return percentile(line, 0.5);
 }
 
+function lineDepthStats(line) {
+  let minDepth = Infinity, maxDepth = -Infinity, meanDepth = 0;
+  for (const z of line) {
+    minDepth = Math.min(minDepth, z);
+    maxDepth = Math.max(maxDepth, z);
+    meanDepth += z;
+  }
+  meanDepth /= line.length || 1;
+  return { minDepth, maxDepth, meanDepth, medianDepth: medianTyped(line) };
+}
+
+function enforceLineBelowPrevious(line, previous, minGap) {
+  if (!previous) return line;
+  for (let i = 0; i < line.length; i++) {
+    const requiredDepth = previous[i] + minGap;
+    if (line[i] < requiredDepth) line[i] = requiredDepth;
+  }
+  return line;
+}
+
 export function geologicModel(d, nt, ns, params = {}) {
   const dt = Number(params.dt) || 0.3125;
   const dx = Number(params.dx) || 0.05;
@@ -1627,6 +1647,23 @@ export function geologicModel(d, nt, ns, params = {}) {
   const agcWindow = Number(params.agcWindow) || 80;
   const modelDepthMax = Number(params.modelDepthMax) || 24;
   const sampleRate = 1 / (dt * 1e-9);
+  const labels = [
+    "upper regolith / disturbed shallow layer",
+    "layered regolith unit A",
+    "layered regolith unit B",
+    "strong reflector package",
+    "deeper weakly resolved material",
+    "deep noisy tail",
+    "unclassified"
+  ];
+  const meanings = [
+    "Upper disturbed regolith above the first continuous reflector.",
+    "Layered regolith package bounded by shallow continuous reflectors.",
+    "Thin layered transition with a clear dielectric contrast.",
+    "Laterally persistent strong reflection package.",
+    "Weakly resolved material below the tracked reflector package.",
+    "Deep interval with lower continuity and higher uncertainty."
+  ];
 
   const preprocess = params.preprocess || {};
   const useDewow = preprocess.dewow !== false;
@@ -1735,27 +1772,10 @@ export function geologicModel(d, nt, ns, params = {}) {
   if (seeds.length < 4) seeds = merged.slice().sort((a, b) => b.support - a.support).slice(0, 6);
   seeds = seeds.sort((a, b) => a.depth - b.depth).slice(0, Number(params.maxHorizons) || 6);
 
-  const labels = [
-    "upper regolith / disturbed shallow layer",
-    "layered regolith unit A",
-    "layered regolith unit B",
-    "strong reflector package",
-    "deeper weakly resolved material",
-    "deep noisy tail",
-    "unclassified"
-  ];
-  const meanings = [
-    "Upper disturbed regolith above the first continuous reflector.",
-    "Layered regolith package bounded by shallow continuous reflectors.",
-    "Thin layered transition with a clear dielectric contrast.",
-    "Laterally persistent strong reflection package.",
-    "Weakly resolved material below the tracked reflector package.",
-    "Deep interval with lower continuity and higher uncertainty."
-  ];
-
   const horizons = [];
   const halfWindow = Number(params.trackHalfWindow) || 0.85;
   const horizonMinGapSamples = Math.max(1, Math.round((Number(params.horizonMinGapM) || 0.15) / depthStep));
+  const horizonMinGapDepth = horizonMinGapSamples * depthStep;
 
   for (let i = 0; i < seeds.length; i++) {
     const center = seeds[i].depth;
@@ -1767,8 +1787,9 @@ export function geologicModel(d, nt, ns, params = {}) {
 
     for (let t = 0; t < nt; t++) {
       let lowS = s0;
-      if (i > 0) {
-        const prevDepth = horizons[i - 1].line[t];
+      const previousHorizon = horizons[horizons.length - 1];
+      if (previousHorizon) {
+        const prevDepth = previousHorizon.line[t];
         const prevS = Math.round(prevDepth / depthStep);
         lowS = Math.max(lowS, prevS + horizonMinGapSamples);
       }
@@ -1788,19 +1809,20 @@ export function geologicModel(d, nt, ns, params = {}) {
     }
 
     const smooth = smoothLine(line, 61);
-    let minDepth = Infinity, maxDepth = -Infinity, mean = 0;
-    for (const z of smooth) { minDepth = Math.min(minDepth, z); maxDepth = Math.max(maxDepth, z); mean += z; }
-    mean /= smooth.length || 1;
+    const previousLine = horizons[horizons.length - 1]?.line;
+    enforceLineBelowPrevious(smooth, previousLine, horizonMinGapDepth);
+    const stats = lineDepthStats(smooth);
+    const horizonIndex = horizons.length;
     horizons.push({
-      name: `H${i + 1}`,
-      meanDepth: mean,
-      medianDepth: medianTyped(smooth),
-      minDepth,
-      maxDepth,
+      name: `H${horizonIndex + 1}`,
+      meanDepth: stats.meanDepth,
+      medianDepth: stats.medianDepth,
+      minDepth: stats.minDepth,
+      maxDepth: stats.maxDepth,
       support: seeds[i].support,
       meanStrength: strength / nt,
-      layerName: labels[Math.min(i, labels.length - 1)],
-      meaning: meanings[Math.min(i, meanings.length - 1)],
+      layerName: labels[Math.min(horizonIndex, labels.length - 1)],
+      meaning: meanings[Math.min(horizonIndex, meanings.length - 1)],
       line: smooth
     });
   }

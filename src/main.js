@@ -276,6 +276,10 @@ const processDefs = {
   "notch-filter": ["Notch Filter", [{ id: "frequencyMHz", label: "陷波频率 MHz", value: 50 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
   predc: ["Predictive Deconvolution", [{ id: "operatorLength", label: "预测算子长度(样点)", value: 32 }, { id: "predictionLength", label: "预测距离(样点)", value: 1 }, { id: "muPercent", label: "预白化 (%)", value: 5 }]],
   "static-correction": ["Static Corrections", [{ id: "elevation", label: "高程值(逗号分隔)", value: "0" }, { id: "swv", label: "表层速度 m/ns", value: .1 }, { id: "wv", label: "次表层速度 m/ns", value: .1 }]],
+  "mean-median-filter": ["Mean/Median Filter", [{ id: "mode", label: "Mode mean/median", value: "mean" }, { id: "vSize", label: "垂直窗口(样点)", value: 3 }, { id: "hSize", label: "水平窗口(道)", value: 3 }]],
+  "notch-filter": ["Notch Filter", [{ id: "frequencyMHz", label: "陷波频率 MHz", value: 50 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  predc: ["Predictive Deconvolution", [{ id: "operatorLength", label: "预测算子长度(样点)", value: 32 }, { id: "predictionLength", label: "预测距离(样点)", value: 1 }, { id: "muPercent", label: "预白化 (%)", value: 5 }]],
+  "static-correction": ["Static Corrections", [{ id: "elevation", label: "高程值(逗号分隔)", value: "0" }, { id: "swv", label: "表层速度 m/ns", value: .1 }, { id: "wv", label: "次表层速度 m/ns", value: .1 }]],
   "advanced-placeholder": ["Tau-P / Curvelet / FDTD", []],
   instantaneous: ["瞬时属性", [{ id: "attr", label: "属性 amplitude/atan/atan2/unwrapped/ifreq", value: "amplitude" }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
   stolt: ["1-D F-K / Stolt Migration", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
@@ -1020,7 +1024,16 @@ async function runGeologyModel() {
     hiMHz: Number($("#geo-hi")?.value || 900),
     bgWidth: Number($("#geo-bg")?.value || 25),
     agcWindow: Number($("#geo-agc")?.value || 80),
-    modelDepthMax: Number($("#geo-depth")?.value || 24)
+    modelDepthMax: Number($("#geo-depth")?.value || 24),
+    preprocess: {
+      dewow: $("#geo-use-dewow")?.checked !== false,
+      dc: $("#geo-use-dc")?.checked !== false,
+      freqFilter: $("#geo-use-freq")?.checked !== false,
+      backgroundRemove: $("#geo-use-bg")?.checked !== false,
+      slidingBg: $("#geo-use-sliding")?.checked !== false,
+      equalize: $("#geo-use-equalize")?.checked === true,
+      gainMethod: $("#geo-gain-method")?.value || "gagc"
+    }
   };
   $("#footer-status").textContent = "正在自动提取界面并生成地质模型";
   try {
@@ -1044,31 +1057,66 @@ function drawGeologyResult() {
   const rows = geologyResult.horizons.map(h => `<tr><td>${h.name}</td><td>${h.medianDepth.toFixed(2)} m</td><td>${h.minDepth.toFixed(2)}-${h.maxDepth.toFixed(2)} m</td><td>${h.layerName}</td><td>${h.meaning}</td></tr>`).join("");
   $("#geo-report").innerHTML = `<div class="geo-kpis"><span>速度 ${geologyResult.velocity.toFixed(3)} m/ns</span><span>εr ${geologyResult.epsilonR.toFixed(2)}</span><span>${geologyResult.numTraces} 道 × ${geologyResult.numSamples} 样点</span></div><table class="mini-table"><thead><tr><th>界面</th><th>中值深度</th><th>范围</th><th>层位命名</th><th>含义</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
+function horizonDepthAtCanvasX(hzn, x, width) {
+  const line = hzn.line || [];
+  if (!line.length) return 0;
+  if (line.length === 1 || width <= 1) return line[0];
+  const pos = x / (width - 1) * (line.length - 1);
+  const i = Math.floor(pos), j = Math.min(line.length - 1, i + 1), f = pos - i;
+  return line[i] + (line[j] - line[i]) * f;
+}
+function paintImagePoint(img, w, h, x, y, rgb, radius = 0) {
+  for (let oy = -radius; oy <= radius; oy++) for (let ox = -radius; ox <= radius; ox++) {
+    const xx = x + ox, yy = y + oy;
+    if (xx < 0 || xx >= w || yy < 0 || yy >= h) continue;
+    const i = (yy * w + xx) * 4;
+    img.data[i] = rgb[0]; img.data[i + 1] = rgb[1]; img.data[i + 2] = rgb[2]; img.data[i + 3] = 255;
+  }
+}
+function paintImageLine(img, w, h, x0, y0, x1, y1, rgb, radius = 0) {
+  let dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  let dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (;;) {
+    paintImagePoint(img, w, h, x0, y0, rgb, radius);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
 function drawLayerModelCanvas(canvas, result) {
   if (!canvas || !result) return;
   const rect = canvas.parentElement.getBoundingClientRect(), dpr = devicePixelRatio || 1;
-  const w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
-  canvas.width = w * dpr; canvas.height = h * dpr; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
-  const ctx = canvas.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  const cssW = Math.max(1, Math.floor(rect.width)), cssH = Math.max(1, Math.floor(rect.height));
+  const w = Math.max(1, Math.floor(cssW * dpr)), h = Math.max(1, Math.floor(cssH * dpr));
+  canvas.width = w; canvas.height = h; canvas.style.width = `${cssW}px`; canvas.style.height = `${cssH}px`;
+  const ctx = canvas.getContext("2d"); ctx.setTransform(1,0,0,1,0,0);
   const palette = [[234,215,183],[214,191,130],[183,193,138],[143,182,161],[120,149,178],[111,116,132],[68,72,87]];
   const img = ctx.createImageData(w, h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const zi = Math.min(result.modelSamples - 1, Math.floor(y / h * result.modelSamples));
-    const ti = Math.min(result.modelTraces - 1, Math.floor(x / w * result.modelTraces));
-    const c = palette[result.modelData[zi * result.modelTraces + ti] || 0], i = (y * w + x) * 4;
-    img.data[i] = c[0]; img.data[i+1] = c[1]; img.data[i+2] = c[2]; img.data[i+3] = 255;
+  const hzns = result.horizons || [];
+  const depthMax = result.modelDepthMax || 1;
+  for (let y = 0; y < h; y++) {
+    const depth = y / (h - 1 || 1) * depthMax;
+    for (let x = 0; x < w; x++) {
+      let layer = 0;
+      for (const hzn of hzns) if (depth >= horizonDepthAtCanvasX(hzn, x, w)) layer++;
+      layer = Math.min(layer, palette.length - 1);
+      const c = palette[layer], i = (y * w + x) * 4;
+      img.data[i] = c[0]; img.data[i+1] = c[1]; img.data[i+2] = c[2]; img.data[i+3] = 255;
+    }
+  }
+  const lineColor = [16, 24, 40], lineRadius = Math.max(0, Math.round(dpr) - 1);
+  for (const hzn of hzns) {
+    let prevY = Math.round(horizonDepthAtCanvasX(hzn, 0, w) / depthMax * (h - 1));
+    paintImagePoint(img, w, h, 0, prevY, lineColor, lineRadius);
+    for (let x = 1; x < w; x++) {
+      const y = Math.round(horizonDepthAtCanvasX(hzn, x, w) / depthMax * (h - 1));
+      paintImageLine(img, w, h, x - 1, prevY, x, y, lineColor, lineRadius);
+      prevY = y;
+    }
   }
   ctx.putImageData(img, 0, 0);
-  ctx.strokeStyle = "#101828"; ctx.lineWidth = 1.2;
-  for (const hzn of result.horizons) {
-    ctx.beginPath();
-    for (let x = 0; x < w; x++) {
-      const t = Math.min(hzn.line.length - 1, Math.floor(x / w * hzn.line.length));
-      const y = hzn.line[t] / result.modelDepthMax * h;
-      x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    }
-    ctx.stroke();
-  }
 }
 function exportGeologyJson() {
   if (!geologyResult) return toast("请先生成自动地质模型", "warn");
@@ -1079,6 +1127,86 @@ function exportGeologyJson() {
     horizons: geologyResult.horizons.map(h => ({ ...h, line: Array.from(h.line) }))
   };
   download(new Blob([JSON.stringify(compact, null, 2)], { type: "application/json" }), "geologic-model.json");
+}
+
+function ensureGeoExportDialog() {
+  let dlg = $("#geo-export-dialog");
+  if (dlg) return dlg;
+  dlg = document.createElement("dialog");
+  dlg.id = "geo-export-dialog";
+  dlg.className = "geo-export-dialog";
+  dlg.innerHTML = '<form method="dialog"><h2>Export Geology Model Image</h2><div class="export-option-group"><h4>Format</h4><label><input type="radio" name="geo-export-format" value="png" checked> PNG</label><label><input type="radio" name="geo-export-format" value="pdf"> PDF (with report)</label></div><div class="export-option-group"><h4>Options</h4><label><input type="checkbox" id="geo-export-lines" checked> Show horizon lines</label></div><div id="geo-export-pdf-opts" style="display:none"><label>Title<input id="geo-export-title" value="Geologic Model"></label></div><menu><button value="cancel">Cancel</button><button id="geo-export-run" value="default" class="primary">Export</button></menu></form>';
+  document.body.appendChild(dlg);
+  dlg.querySelector("input[name='geo-export-format'][value='pdf']").onchange = function() { $("#geo-export-pdf-opts").style.display = "block"; };
+  dlg.querySelector("input[name='geo-export-format'][value='png']").onchange = function() { $("#geo-export-pdf-opts").style.display = "none"; };
+  return dlg;
+}
+
+function openGeoExport() {
+  if (!geologyResult) return toast("Please run geology model first", "warn");
+  const dlg = ensureGeoExportDialog();
+  dlg.onclose = function() {
+    if (dlg.returnValue !== "default") return;
+    const format = dlg.querySelector("input[name='geo-export-format']:checked")?.value || "png";
+    const showLines = $("#geo-export-lines")?.checked !== false;
+    const title = $("#geo-export-title")?.value || "Geologic Model";
+    exportGeoImage(format, showLines, title);
+  };
+  dlg.showModal();
+}
+
+function exportGeoImage(format, showLines, title) {
+  const result = geologyResult;
+  const w = Math.min(result.numTraces || result.modelTraces, 4000);
+  const dpr = 2;
+  const pw = w * dpr;
+  const ph = 1200 * dpr;
+  const canvas = document.createElement("canvas");
+  canvas.width = pw; canvas.height = ph;
+  const ctx = canvas.getContext("2d");
+  const palette = [[234,215,183],[214,191,130],[183,193,138],[143,182,161],[120,149,178],[111,116,132],[68,72,87]];
+  const hzns = result.horizons || [];
+  const depthMax = result.modelDepthMax || 1;
+  const img = ctx.createImageData(pw, ph);
+  for (let y = 0; y < ph; y++) {
+    const depth = y / (ph - 1 || 1) * depthMax;
+    for (let x = 0; x < pw; x++) {
+      let layer = 0;
+      for (const hzn of hzns) {
+        const ti = Math.min(hzn.line.length - 1, Math.floor(x / pw * hzn.line.length));
+        if (depth >= hzn.line[ti]) layer++;
+      }
+      layer = Math.min(layer, palette.length - 1);
+      const c = palette[layer], i = (y * pw + x) * 4;
+      img.data[i] = c[0]; img.data[i+1] = c[1]; img.data[i+2] = c[2]; img.data[i+3] = 255;
+    }
+  }
+  if (showLines) {
+    for (const hzn of hzns) {
+      for (let x = 0; x < pw; x++) {
+        const t = Math.min(hzn.line.length - 1, Math.floor(x / pw * hzn.line.length));
+        const py = Math.round(hzn.line[t] / depthMax * (ph - 1));
+        if (py < 0 || py >= ph) continue;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = py + dy;
+          if (yy < 0 || yy >= ph) continue;
+          const i = (yy * pw + x) * 4;
+          img.data[i] = 16; img.data[i+1] = 24; img.data[i+2] = 40;
+        }
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  if (format === "pdf") {
+    const dataUrl = canvas.toDataURL("image/png");
+    const rows = hzns.map(function(h) { return '<tr><td>'+h.name+'</td><td>'+h.medianDepth.toFixed(2)+' m</td><td>'+h.minDepth.toFixed(2)+'-'+h.maxDepth.toFixed(2)+' m</td><td>'+h.layerName+'</td><td>'+h.meaning+'</td></tr>'; }).join("");
+    const html = '<!doctype html><html><head><meta charset="utf-8"><title>'+title+'</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#1a1a1a}h1{font-size:18px;border-bottom:2px solid #2563eb;padding-bottom:8px}table{width:100%;border-collapse:collapse;margin:16px 0;font-size:12px}th,td{border:1px solid #d1d5db;padding:6px 10px}th{background:#f3f4f6}.kpis{display:flex;gap:24px;margin:10px 0;font-size:13px}img{max-width:100%}</style></head><body><h1>'+title+'</h1><div class="kpis"><span>Velocity '+result.velocity.toFixed(3)+' m/ns</span><span>eps-r '+(result.epsilonR||9).toFixed(2)+'</span><span>Depth 0-'+depthMax.toFixed(1)+' m</span><span>'+(result.numTraces||result.modelTraces)+' traces</span></div><img src="'+dataUrl+'"><h2>Horizon Interpretation</h2><table><thead><tr><th>Horizon</th><th>Median Depth</th><th>Range</th><th>Layer</th><th>Meaning</th></tr></thead><tbody>'+rows+'</tbody></table><script>print()</'+'script></body></html>';
+    const win = window.open("", "_blank");
+    if (win) { win.document.write(html); win.document.close(); toast("Print dialog opened - save as PDF"); }
+    else { download(new Blob([html], { type: "text/html" }), title+".html"); toast("Popup blocked - exported HTML instead"); }
+  } else {
+    canvas.toBlob(function(blob) { download(blob, title+".png"); });
+  }
 }
 
 function exportData(kind) {
@@ -1138,6 +1266,7 @@ function bindUi() {
     if (action === "annotation-clear") { radarAnnotations = []; updateAnnotationPanel(); }
     if (action === "run-geology") runGeologyModel();
     if (action === "export-geology") exportGeologyJson();
+    if (action === "export-geo-image") openGeoExport();
     if (action === "open-trace") openFloat("trace-window");
     if (action === "open-spectrum") openFloat("spectrum-window");
     if (action === "hold-output") store.holdOutput() ? toast("Output Data 已接受为 Current Input Data") : toast("没有 Output Data", "warn");
@@ -1196,7 +1325,6 @@ function makeDraggable(win) {
 }
 function openUndo() {
   $("#undo-list").innerHTML = store.snapshots.map((s,i)=>`<button value="cancel" data-restore="${i}">${i===0?"原始导入":`步骤 ${i}`} · ${s.numTraces}×${s.numSamples}</button>`).join("");
-  $("#undo-dialog").showModal();
   $$("[data-restore]").forEach(b => b.onclick = () => { store.restore(Number(b.dataset.restore)); toast("已恢复历史状态"); });
 }
 async function computeSpecial(op, name) {
@@ -1223,7 +1351,7 @@ async function computeAttenuation() {
   }
 }
 function simpleVelocityCalc() {
-  const epsr = Number(prompt("相对介电常数 εr", "9") || 9);
+  const epsr = Number(prompt("epsilon_r", "9") || 9);
   const v = 0.299792458 / Math.sqrt(epsr);
   toast(`V = ${v.toFixed(4)} m/ns`);
 }

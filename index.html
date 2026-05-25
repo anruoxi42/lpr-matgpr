@@ -333,9 +333,26 @@
             <label>AGC samples<input id="geo-agc" type="number" value="80" step="5"></label>
             <label>model depth m<input id="geo-depth" type="number" value="24" step="1"></label>
           </div>
+          <div class="geo-toggles">
+            <label class="toggle-label"><input type="checkbox" id="geo-use-dewow" checked> Dewow</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-dc" checked> Remove DC</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-freq" checked> Freq Filter</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-bg" checked> Bg Remove</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-sliding" checked> Sliding Bg</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-equalize"> Equalize</label>
+            <label class="toggle-label">Gain:
+              <select id="geo-gain-method">
+                <option value="gagc">Gaussian AGC</option>
+                <option value="agc">Standard AGC</option>
+                <option value="power">Power Gain</option>
+                <option value="amplitude">Amplitude Decay</option>
+              </select>
+            </label>
+          </div>
           <div class="button-row">
             <button class="primary" data-action="run-geology">自动提取界面并生成地质模型</button>
             <button data-action="export-geology">导出地质模型 JSON</button>
+            <button data-action="export-geo-image">导出图像</button>
           </div>
           <div class="geo-canvas-grid">
             <div>
