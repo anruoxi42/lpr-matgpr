@@ -1,4 +1,5 @@
 import { RECORD_SIZE, SAMPLES_PER_TRACE, parse2BFile, write2BFile, writeMgpJson, writeSEGYLike, writeSEGYFile, writeDZTFile } from "./io/twoB.js";
+import { parseHadText, parseHcdFile } from "./io/hcd.js";
 import { IpdStore } from "./processing/ipdStore.js";
 import { depthAxisFromVofh, spectrum, fkSpectrum } from "./processing/algorithms.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
@@ -126,19 +127,122 @@ function applyDepthAxisMode() {
   $("#depth-axis-toggle")?.classList.toggle("active", depthAxisEnabled);
 }
 
+function fileExt(name) {
+  const match = String(name || "").toLowerCase().match(/\.[^.]+$/);
+  return match ? match[0] : "";
+}
+
+function fileStem(name) {
+  return String(name || "").replace(/\.[^.]+$/i, "").toLowerCase();
+}
+
+function finishImport(parsed, file) {
+  store.loadDataset({ ...parsed, name: file.name, fileSize: file.size, loadedAt: new Date().toLocaleString("zh-CN") });
+  clearInteractionState();
+  toast(`${file.name} 导入成功`);
+  $("#footer-status").textContent = "导入完成";
+  switchPage("radar");
+}
+
+async function read2BImport(file) {
+  $("#footer-status").textContent = `正在解析 ${file.name}`;
+  finishImport(parse2BFile(await file.arrayBuffer()), file);
+}
+
+function ensureHcdManualDialog() {
+  let dlg = $("#hcd-manual-dialog");
+  if (dlg) return dlg;
+  dlg = document.createElement("dialog");
+  dlg.id = "hcd-manual-dialog";
+  dlg.innerHTML = `
+    <form method="dialog">
+      <h2>HCD 手动参数</h2>
+      <p class="muted">未同时选择同名 .had 文件，请填写 .hcd 样点矩阵参数。</p>
+      <div class="dialog-fields">
+        <label>DATA BIT<input id="hcd-bit" value="16"></label>
+        <label>SAMPLES<input id="hcd-samples" value=""></label>
+        <label>TRACE NUMBER<input id="hcd-traces" value=""></label>
+        <label>TIMEWINDOW ns<input id="hcd-timewindow" value=""></label>
+        <label>FREQUENCY MHz<input id="hcd-frequency" value=""></label>
+        <label>TRACE INCREMENT m<input id="hcd-dx" value="0.01"></label>
+        <label>Endian
+          <select id="hcd-endian">
+            <option value="little">little-endian</option>
+            <option value="big">big-endian</option>
+          </select>
+        </label>
+      </div>
+      <menu>
+        <button value="cancel">取消</button>
+        <button id="hcd-manual-run" value="default" class="primary">导入 HCD</button>
+      </menu>
+    </form>`;
+  document.body.appendChild(dlg);
+  return dlg;
+}
+
+function requestHcdManualParams(file) {
+  const dlg = ensureHcdManualDialog();
+  const updateTraceHint = () => {
+    const bytes = Number($("#hcd-bit")?.value || 16) / 8 || 2;
+    const samples = Number($("#hcd-samples")?.value || 0);
+    $("#hcd-traces").placeholder = file?.size && samples > 0 ? String(Math.floor(file.size / (samples * bytes))) : "";
+  };
+  $("#hcd-bit").oninput = updateTraceHint;
+  $("#hcd-samples").oninput = updateTraceHint;
+  updateTraceHint();
+  return new Promise(resolve => {
+    dlg.onclose = () => {
+      if (dlg.returnValue !== "default") return resolve(null);
+      resolve({
+        dataBit: Number($("#hcd-bit").value),
+        samples: Number($("#hcd-samples").value),
+        traces: Number($("#hcd-traces").value),
+        timeWindowNs: Number($("#hcd-timewindow").value),
+        frequencyMHz: Number($("#hcd-frequency").value),
+        dxM: Number($("#hcd-dx").value || 1),
+        littleEndian: $("#hcd-endian").value !== "big"
+      });
+    };
+    dlg.showModal();
+  });
+}
+
+async function readHcdImport(hcdFile, hadFile = null) {
+  $("#footer-status").textContent = `正在解析 ${hcdFile.name}`;
+  const params = hadFile ? parseHadText(await hadFile.text()) : await requestHcdManualParams(hcdFile);
+  if (!params) {
+    $("#footer-status").textContent = "HCD 导入已取消";
+    return;
+  }
+  finishImport(parseHcdFile(await hcdFile.arrayBuffer(), params), hcdFile);
+}
+
 async function importFiles(files) {
-  for (const file of files) {
-    if (!file.name.toLowerCase().endsWith(".2b")) { toast(`${file.name} 暂未启用导入，第一阶段请使用 .2B`, "warn"); continue; }
+  const list = Array.from(files || []);
+  const groups = new Map();
+  for (const file of list) {
+    const ext = fileExt(file.name);
+    if (![".2b", ".hcd", ".had"].includes(ext)) {
+      toast(`${file.name} 暂不支持导入`, "warn");
+      continue;
+    }
+    const stem = fileStem(file.name);
+    const group = groups.get(stem) || {};
+    if (ext === ".2b") group.twoB = file;
+    else if (ext === ".hcd") group.hcd = file;
+    else if (ext === ".had") group.had = file;
+    groups.set(stem, group);
+  }
+  for (const group of groups.values()) {
     try {
-      $("#footer-status").textContent = `正在解析 ${file.name}`;
-      const parsed = parse2BFile(await file.arrayBuffer());
-      store.loadDataset({ ...parsed, name: file.name, fileSize: file.size, loadedAt: new Date().toLocaleString("zh-CN") });
-      clearInteractionState();
-      toast(`${file.name} 导入成功`);
-      $("#footer-status").textContent = "导入完成";
-      switchPage("radar");
+      if (group.twoB) await read2BImport(group.twoB);
+      if (group.hcd) await readHcdImport(group.hcd, group.had || null);
+      else if (group.had) toast(`${group.had.name}: 请同时选择同名 .hcd 文件`, "warn");
     } catch (error) {
-      toast(`${file.name}: ${error.message}`, "err");
+      const name = group.twoB?.name || group.hcd?.name || group.had?.name || "data";
+      toast(`${name}: ${error.message}`, "err");
+      $("#footer-status").textContent = "导入失败";
     }
   }
 }
@@ -149,7 +253,7 @@ const processDefs = {
   "bad-traces": ["不良道插值替换", [{ id: "ranges", label: "坏道范围，例如 5-9,22", value: "" }]],
   "remove-dc": ["去均值 Remove DC", []],
   "dewow": ["去低频 Dewow", []],
-  "dzt-gain": ["Remove DZT header gain", []],
+  "dzt-gain": ["Remove DZT header gain", [{ id: "gain", label: "Gain points (dB, comma-separated)", value: "0,2,4,6,8,10" }]],
   "equalize": ["均衡轨迹", []],
   "resample-time": ["重采样时间轴", [{ id: "samples", label: "新样点数", value: 2048 }, { id: "dtNs", label: "当前 dt (ns)", value: 0.625 }, { id: "order", label: "sinc 半阶", value: 15 }]],
   "resample-scan": ["重采样扫描轴", [{ id: "traces", label: "新道数", value: 512 }, { id: "dxM", label: "当前 dx (m)", value: 0.05 }, { id: "order", label: "sinc 半阶", value: 15 }]],
@@ -168,17 +272,21 @@ const processDefs = {
   "fx-decon": ["F-X Deconvolution", [{ id: "operatorLength", label: "预测算子长度", value: 8 }, { id: "muPercent", label: "预白化 (%)", value: 1 }, { id: "flowMHz", label: "低频 MHz", value: 20 }, { id: "fhighMHz", label: "高频 MHz", value: 600 }]],
   "sparse-decon": ["Sparse Deconvolution", [{ id: "frequencyMHz", label: "Ricker 主频 MHz", value: 100 }, { id: "lengthSamples", label: "子波长度样点", value: 64 }, { id: "mu", label: "L1 正则 mu", value: 0.01 }, { id: "iterations", label: "IRLS 迭代", value: 10 }, { id: "output", label: "输出 reflectivity/predicted", value: "reflectivity" }]],
   "attenuation-analysis": ["Attenuation Analysis", []],
-  "advanced-placeholder": ["Curvelet / Wavelet / Tau-P / F-X", []],
+  "mean-median-filter": ["Mean/Median Filter", [{ id: "mode", label: "Mode mean/median", value: "mean" }, { id: "vSize", label: "垂直窗口(样点)", value: 3 }, { id: "hSize", label: "水平窗口(道)", value: 3 }]],
+  "notch-filter": ["Notch Filter", [{ id: "frequencyMHz", label: "陷波频率 MHz", value: 50 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  predc: ["Predictive Deconvolution", [{ id: "operatorLength", label: "预测算子长度(样点)", value: 32 }, { id: "predictionLength", label: "预测距离(样点)", value: 1 }, { id: "muPercent", label: "预白化 (%)", value: 5 }]],
+  "static-correction": ["Static Corrections", [{ id: "elevation", label: "高程值(逗号分隔)", value: "0" }, { id: "swv", label: "表层速度 m/ns", value: .1 }, { id: "wv", label: "次表层速度 m/ns", value: .1 }]],
+  "advanced-placeholder": ["Tau-P / Curvelet / FDTD", []],
   instantaneous: ["瞬时属性", [{ id: "attr", label: "属性 amplitude/atan/atan2/unwrapped/ifreq", value: "amplitude" }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
   stolt: ["1-D F-K / Stolt Migration", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
   gazdag: ["1-D Phase-shift / Gazdag", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
   "time-depth": ["Time-to-Depth Conversion", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dzM", label: "深度采样 m", value: .02 }]],
-  pspi: ["2-D PSPI Migration", [{ id: "velocity", label: "参考速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }]],
+  pspi: ["2-D PSPI Migration", [{ id: "velocity", label: "参考速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }, { id: "dzM", label: "深度步长 m", value: .02 }, { id: "zMaxM", label: "最大深度 m (可空)", value: "" }]],
   "split-step": ["2-D Split-step Fourier", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }, { id: "dzM", label: "深度步长 m", value: .02 }, { id: "zMaxM", label: "最大深度 m (可空)", value: "" }, { id: "fMaxGHz", label: "最高频率 GHz (可空)", value: "" }, { id: "q", label: "Q (可空)", value: "" }, { id: "antennaFreqMHz", label: "天线频率 MHz (可空)", value: "" }]]
 };
 
 function openProcess(op) {
-  if (!store.current) return toast("请先导入 .2B 数据", "warn");
+  if (!store.current) return toast("请先导入数据", "warn");
   if (op === "fk-filter") return openFkDesigner();
   const [title, fields] = processDefs[op] || [op, []];
   const fieldValue = f => {
@@ -204,12 +312,12 @@ function openProcess(op) {
       const params = {};
       $$("[data-field]").forEach(i => {
         const key = i.dataset.field;
-        params[key] = isNaN(Number(i.value)) || ["type", "ranges", "curve", "attr", "power", "output", "vofh"].includes(key) ? i.value : Number(i.value);
+        params[key] = isNaN(Number(i.value)) || ["type", "ranges", "curve", "attr", "power", "output", "vofh", "gain"].includes(key) ? i.value : Number(i.value);
       });
       if (params.vofh) currentVofhText = params.vofh;
       $("#process-dialog").close();
       $("#footer-status").textContent = `正在执行 ${title}`;
-      if (op === "dzt-gain" || op === "advanced-placeholder") return toast("该功能入口已新增，算法将在下一阶段接入。", "warn");
+      if (op === "advanced-placeholder") return toast("该功能入口已新增，算法将在下一阶段接入。", "warn");
       const result = await runWorker(op, store.current, params);
       store.setOutput({ ...result, name: `${store.current.name}_${op}` }, { name: title, op, params });
       displaySource = "output"; $("#display-mode").value = "output";
@@ -270,7 +378,7 @@ function ensureFkDialog() {
 
 function openFkDesigner() {
   const ds = store.current;
-  if (!ds) return toast("请先导入 .2B 数据", "warn");
+  if (!ds) return toast("请先导入数据", "warn");
   const dlg = ensureFkDialog();
   const cv = $("#fk-canvas");
   const dt = ds.meta?.dtNs || ds.dtNs || 0.625;
@@ -588,7 +696,7 @@ function bindModel() {
 }
 
 function create3D() {
-  if (!store.current) return toast("请先导入多条或一条 .2B 数据", "warn");
+  if (!store.current) return toast("请先导入多条或一条数据", "warn");
   const ds = store.current, yCount = Math.max(1, store.ipd ? 1 : 1);
   threeVolume = { nx: ds.numTraces, ny: yCount, nz: ds.numSamples, data: ds.data };
   $("#three-info").textContent = `3D volume: ${threeVolume.nx} × ${threeVolume.ny} × ${threeVolume.nz}`;
@@ -903,7 +1011,7 @@ function exportCsv(ds) {
 }
 async function runGeologyModel() {
   const ds = currentDisplayed();
-  if (!ds) return toast("请先导入 .2B 数据", "warn");
+  if (!ds) return toast("请先导入数据", "warn");
   const params = {
     velocity: Number($("#geo-velocity")?.value || 0.1),
     dt: Number($("#geo-dt")?.value || 0.3125),
@@ -1115,19 +1223,4 @@ async function computeAttenuation() {
   }
 }
 function simpleVelocityCalc() {
-  const epsr = Number(prompt("相对介电常数 εr", "9") || 9);
-  const v = 0.299792458 / Math.sqrt(epsr);
-  toast(`V = ${v.toFixed(4)} m/ns`);
-}
-function forwardModel() {
-  const nt = 300, ns = 512, data = new Float32Array(nt*ns);
-  for (const o of model.objects) {
-    const x0 = Math.round((o.x / Math.max(1, $("#model-canvas").clientWidth)) * nt), z0 = Math.round((o.y / Math.max(1, $("#model-canvas").clientHeight)) * ns), amp = (o.epsr || 10) / 10;
-    for (let t=0;t<nt;t++){ const s=Math.round(Math.sqrt(z0*z0+(t-x0)*(t-x0)*.8)); if(s>=0&&s<ns)data[t*ns+s]+=amp; }
-  }
-  store.setOutput({ data, numTraces:nt, numSamples:ns, name:"forward_model" }, { name:"正演模拟", op:"forward", params:{objects:model.objects.length} });
-  displaySource = "output"; $("#display-mode").value = "output"; toast("正演模拟已生成 Output Data");
-}
-
-bindUi();
-refresh();
+  const epsr = Number(prompt("相对介电常数 εr", "9"

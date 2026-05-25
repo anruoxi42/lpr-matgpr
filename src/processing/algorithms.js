@@ -1093,6 +1093,119 @@ export function simpleMigration(d, nt, ns, velocity = 0.1, dt = 0.625, dx = 0.05
   return { data: o, numTraces: nt, numSamples: ns };
 }
 
+export function pspiMigration(d, nt, ns, params = {}) {
+  const dtNs = safeNumber(params.dtNs ?? params.dt, 0.625);
+  const dxM = safeNumber(params.dxM ?? params.dx, 0.05);
+  const velocity = safeNumber(params.velocity, 0.1);
+  const dzM = Number.isFinite(params.dzM) && params.dzM > 0 ? params.dzM : 0.02;
+  const zMax = Number.isFinite(params.zMaxM) && params.zMaxM > 0
+    ? params.zMaxM
+    : velocity * dtNs * (ns - 1) / 2;
+
+  const nz = Math.max(2, Math.floor(zMax / dzM) + 1);
+  const zmig = new Float32Array(nz);
+  for (let iz = 0; iz < nz; iz++) zmig[iz] = iz * dzM;
+
+  const ntfft = ns;
+  const nw = Math.floor(ntfft / 2) + 1;
+  const dw = 2 * Math.PI / (ntfft * dtNs * 1e-9);
+  const nxfft = nextPow2(nt);
+  const dk = 2 * Math.PI / (nxfft * dxM);
+
+  const w = new Float64Array(nw);
+  w[0] = 1e-10 / (dtNs * 1e-9);
+  for (let iw = 1; iw < nw; iw++) w[iw] = iw * dw;
+
+  const cdR = new Float64Array(nw * nxfft);
+  const cdI = new Float64Array(nw * nxfft);
+
+  for (let ix = 0; ix < nt; ix++) {
+    const tr = new Float64Array(ntfft), ti = new Float64Array(ntfft);
+    for (let s = 0; s < ns; s++) tr[s] = d[ix * ns + s];
+    fft(tr, ti);
+    for (let iw = 0; iw < nw; iw++) {
+      cdR[iw * nxfft + ix] = tr[iw];
+      cdI[iw * nxfft + ix] = ti[iw];
+    }
+  }
+
+  const dmig = new Float32Array(nz * nt);
+  const vhalf = velocity * 0.5;
+  const kxNyq = Math.PI / dxM;
+
+  for (let iz = 0; iz < nz; iz++) {
+    for (let ix = 0; ix < nt; ix++) {
+      let sum = 0;
+      for (let iw = 0; iw < nw; iw++) sum += cdR[iw * nxfft + ix];
+      dmig[iz * nt + ix] += sum;
+    }
+
+    for (let ix = 0; ix < nt; ix++) {
+      for (let iw = 0; iw < nw; iw++) {
+        const phase = -w[iw] * dzM * 2 / velocity;
+        const cr = Math.cos(phase), ci = Math.sin(phase);
+        const idx = iw * nxfft + ix;
+        const nr = cdR[idx] * cr - cdI[idx] * ci;
+        const ni = cdR[idx] * ci + cdI[idx] * cr;
+        cdR[idx] = nr;
+        cdI[idx] = ni;
+      }
+    }
+
+    for (let iw = 0; iw < nw; iw++) {
+      const off = iw * nxfft;
+      const lr = cdR.subarray(off, off + nxfft);
+      const li = cdI.subarray(off, off + nxfft);
+      fft(lr, li);
+      fftShift1(lr, li);
+    }
+
+    for (let iw = 0; iw < nw; iw++) {
+      const freq = w[iw];
+      for (let ik = 0; ik < nxfft; ik++) {
+        const kx = ik < nxfft / 2 ? ik * dk : (ik - nxfft) * dk;
+        const ratio = (vhalf * kx) / freq;
+        const kz = 1 - ratio * ratio;
+
+        const idx = iw * nxfft + ik;
+        if (kz > 0) {
+          const phase = -freq * Math.sqrt(kz) * dzM / vhalf + freq * dzM / vhalf;
+          const cr = Math.cos(phase), ci = Math.sin(phase);
+          const nr = cdR[idx] * cr - cdI[idx] * ci;
+          const ni = cdR[idx] * ci + cdI[idx] * cr;
+          cdR[idx] = nr;
+          cdI[idx] = ni;
+        } else {
+          const decay = Math.exp(-freq * Math.sqrt(-kz) * dzM / vhalf);
+          cdR[idx] *= decay;
+          cdI[idx] *= decay;
+        }
+      }
+    }
+
+    for (let iw = 0; iw < nw; iw++) {
+      const off = iw * nxfft;
+      const lr = cdR.subarray(off, off + nxfft);
+      const li = cdI.subarray(off, off + nxfft);
+      fftShift1(lr, li);
+      fft(lr, li, true);
+    }
+  }
+
+  const norm = 1 / ntfft;
+  for (let i = 0; i < dmig.length; i++) dmig[i] *= norm;
+
+  return {
+    data: dmig,
+    numTraces: nt,
+    numSamples: nz,
+    depthAxisM: zmig,
+    depthStep: dzM,
+    verticalAxisKind: "depth",
+    velocity
+  };
+}
+
 export function timeDepth(d, nt, ns, velocityOrParams = 0.1, dt = 0.625, dz = 0.02) {
   const params = typeof velocityOrParams === "object" ? velocityOrParams : { velocity: velocityOrParams, dt, dz };
   const dtNs = safeNumber(params.dtNs ?? params.dt, dt);
@@ -1515,11 +1628,27 @@ export function geologicModel(d, nt, ns, params = {}) {
   const modelDepthMax = Number(params.modelDepthMax) || 24;
   const sampleRate = 1 / (dt * 1e-9);
 
-  let r = removeDC(d, nt, ns).data;
-  r = freqFilter(r, nt, ns, "bp", loMHz * 1e6, hiMHz * 1e6, sampleRate).data;
-  r = backgroundRemove(r, nt, ns).data;
-  r = slidingBackground(r, nt, ns, bgWidth, "remove").data;
-  r = agc(r, nt, ns, agcWindow, true).data;
+  const preprocess = params.preprocess || {};
+  const useDewow = preprocess.dewow !== false;
+  const useDC = preprocess.dc !== false;
+  const useFreq = preprocess.freqFilter !== false;
+  const useBg = preprocess.backgroundRemove !== false;
+  const useSlidingBg = preprocess.slidingBg !== false;
+  const useEqualize = preprocess.equalize === true;
+  const gainMethod = preprocess.gainMethod || "gagc";
+
+  let r = new Float32Array(d);
+  if (useDewow) r = dewow(r, nt, ns).data;
+  if (useDC) r = removeDC(r, nt, ns).data;
+  if (useFreq) r = freqFilter(r, nt, ns, "bp", loMHz * 1e6, hiMHz * 1e6, sampleRate).data;
+  if (useBg) r = backgroundRemove(r, nt, ns).data;
+  if (useSlidingBg) r = slidingBackground(r, nt, ns, bgWidth, "remove").data;
+  if (useEqualize) r = equalize(r, nt, ns).data;
+
+  if (gainMethod === "agc") r = agc(r, nt, ns, agcWindow, false).data;
+  else if (gainMethod === "power") r = powerGain(r, nt, ns, { power: "auto", dtNs: dt }).data;
+  else if (gainMethod === "amplitude") r = amplitudeGain(r, nt, ns, { dtNs: dt }).data;
+  else r = agc(r, nt, ns, agcWindow, true).data;
 
   const clip = Number(params.clip) || 4;
   for (let i = 0; i < r.length; i++) {
@@ -1535,6 +1664,7 @@ export function geologicModel(d, nt, ns, params = {}) {
   const startSample = Math.max(0, Math.floor((Number(params.startDepth) || 1.5) / depthStep));
   const endSample = Math.min(ns - 2, Math.ceil((Number(params.endDepth) || Math.min(24, (ns - 1) * depthStep)) / depthStep));
   const minSepSamples = Math.max(1, Math.round((Number(params.minHorizonSeparation) || 0.8) / depthStep));
+  const maxPeaksPerTrace = clamp(Math.floor(Number(params.maxPeaksPerTrace) || 4), 1, 10);
   const peaks = [];
   for (let t = 0; t < nt; t++) {
     const candidates = [];
@@ -1546,7 +1676,7 @@ export function geologicModel(d, nt, ns, params = {}) {
     const chosen = [];
     for (const c of candidates) {
       if (chosen.every(p => Math.abs(p.s - c.s) >= minSepSamples)) chosen.push(c);
-      if (chosen.length >= 4) break;
+      if (chosen.length >= maxPeaksPerTrace) break;
     }
     for (const c of chosen) peaks.push({ t, depth: c.s * depthStep, strength: c.v });
   }
@@ -1559,14 +1689,15 @@ export function geologicModel(d, nt, ns, params = {}) {
     if (bi >= 0 && bi < binCount) hist[bi] += p.strength;
   }
 
-  const histThreshold = percentile(hist, 0.72);
+  const histThreshold = percentile(hist, Number(params.histPercentile) || 0.72);
   const clusters = [];
+  const clusterSearchM = Number(params.clusterSearchM) || 0.75;
   for (let i = 1; i < binCount - 1; i++) {
     if (!(hist[i] >= hist[i - 1] && hist[i] > hist[i + 1] && hist[i] > histThreshold)) continue;
     const d0 = binStart + i * binSize, d1 = d0 + binSize;
     let sumDepth = 0, sumWeight = 0, support = 0, strength = 0;
     for (const p of peaks) {
-      if (p.depth >= d0 - 0.75 && p.depth <= d1 + 0.75) {
+      if (p.depth >= d0 - clusterSearchM && p.depth <= d1 + clusterSearchM) {
         sumDepth += p.depth * p.strength;
         sumWeight += p.strength;
         strength += p.strength;
@@ -1576,10 +1707,11 @@ export function geologicModel(d, nt, ns, params = {}) {
     if (support) clusters.push({ depth: sumDepth / Math.max(sumWeight, 1e-9), support, strength: strength / support });
   }
 
+  const mergeDistanceM = Number(params.mergeDistanceM) || 0.7;
   const merged = [];
   for (const c of clusters.sort((a, b) => a.depth - b.depth)) {
     const last = merged[merged.length - 1];
-    if (last && Math.abs(c.depth - last.depth) < 0.7) {
+    if (last && Math.abs(c.depth - last.depth) < mergeDistanceM) {
       const total = last.support + c.support;
       last.depth = (last.depth * last.support + c.depth * c.support) / total;
       last.support = total;
@@ -1587,7 +1719,19 @@ export function geologicModel(d, nt, ns, params = {}) {
     } else merged.push({ ...c });
   }
 
-  let seeds = merged.filter(c => c.support > nt * 0.22);
+  if (!merged.length) {
+    return {
+      data: r, numTraces: nt, numSamples: ns,
+      modelData: new Uint8Array(0), modelTraces: 0, modelSamples: 0,
+      modelDepthMax, depthStep, distanceStep: dx, velocity,
+      epsilonR: (0.299792458 / velocity) ** 2, horizons: [], layerNames: labels,
+      params: { dt, dx, velocity, loMHz, hiMHz, bgWidth, agcWindow, modelDepthMax },
+      error: "No horizon clusters found. Try lowering histPercentile or adjusting filter parameters."
+    };
+  }
+
+  const supportThreshold = Number(params.supportThreshold) || 0.22;
+  let seeds = merged.filter(c => c.support > nt * supportThreshold);
   if (seeds.length < 4) seeds = merged.slice().sort((a, b) => b.support - a.support).slice(0, 6);
   seeds = seeds.sort((a, b) => a.depth - b.depth).slice(0, Number(params.maxHorizons) || 6);
 
@@ -1611,6 +1755,8 @@ export function geologicModel(d, nt, ns, params = {}) {
 
   const horizons = [];
   const halfWindow = Number(params.trackHalfWindow) || 0.85;
+  const horizonMinGapSamples = Math.max(1, Math.round((Number(params.horizonMinGapM) || 0.15) / depthStep));
+
   for (let i = 0; i < seeds.length; i++) {
     const center = seeds[i].depth;
     const s0 = Math.max(startSample, Math.floor((center - halfWindow) / depthStep));
@@ -1618,15 +1764,29 @@ export function geologicModel(d, nt, ns, params = {}) {
     if (s1 <= s0 + 2) continue;
     const line = new Float32Array(nt);
     let strength = 0;
+
     for (let t = 0; t < nt; t++) {
-      let bestS = s0, bestV = -Infinity;
-      for (let s = s0; s <= s1; s++) {
+      let lowS = s0;
+      if (i > 0) {
+        const prevDepth = horizons[i - 1].line[t];
+        const prevS = Math.round(prevDepth / depthStep);
+        lowS = Math.max(lowS, prevS + horizonMinGapSamples);
+      }
+      let highS = s1;
+      if (i < seeds.length - 1) {
+        highS = Math.min(highS, s1);
+      }
+      if (lowS >= highS) lowS = Math.max(s0, highS - 2);
+
+      let bestS = lowS, bestV = -Infinity;
+      for (let s = lowS; s <= highS; s++) {
         const v = energySmoothed[t * ns + s];
         if (v > bestV) { bestV = v; bestS = s; }
       }
       line[t] = bestS * depthStep;
       strength += bestV;
     }
+
     const smooth = smoothLine(line, 61);
     let minDepth = Infinity, maxDepth = -Infinity, mean = 0;
     for (const z of smooth) { minDepth = Math.min(minDepth, z); maxDepth = Math.max(maxDepth, z); mean += z; }
@@ -1673,4 +1833,190 @@ export function geologicModel(d, nt, ns, params = {}) {
     layerNames: labels,
     params: { dt, dx, velocity, loMHz, hiMHz, bgWidth, agcWindow, modelDepthMax }
   };
+}
+
+export function removeDztGain(d, nt, ns, params = {}) {
+  const gainDb = params.gainDb || params.gain || [];
+  if (!gainDb.length) return { data: new Float32Array(d), numTraces: nt, numSamples: ns };
+  const g = new Float64Array(ns);
+  if (gainDb.length === ns) {
+    for (let s = 0; s < ns; s++) g[s] = 10 ** (gainDb[s] / 20);
+  } else {
+    const xs = new Float64Array(gainDb.length);
+    const ys = new Float64Array(gainDb.length);
+    for (let i = 0; i < gainDb.length; i++) {
+      xs[i] = i / Math.max(1, gainDb.length - 1) * (ns - 1);
+      ys[i] = gainDb[i];
+    }
+    for (let s = 0; s < ns; s++) {
+      g[s] = 10 ** (linearInterpolate(xs, ys, s) / 20);
+    }
+  }
+  const o = new Float32Array(d.length);
+  for (let t = 0; t < nt; t++) {
+    for (let s = 0; s < ns; s++) {
+      o[t * ns + s] = g[s] > 1e-12 ? d[t * ns + s] / g[s] : d[t * ns + s];
+    }
+  }
+  return { data: o, numTraces: nt, numSamples: ns };
+}
+
+export function meanMedianFilter(d, nt, ns, params = {}) {
+  const nv = clamp(Math.floor(safeNumber(params.nv ?? params.vSize ?? 3, 3)), 1, Math.floor(ns / 4));
+  const nx = clamp(Math.floor(safeNumber(params.nx ?? params.hSize ?? 3, 3)), 1, Math.floor(nt / 4));
+  const mode = String(params.mode || "mean").toLowerCase();
+
+  if (mode === "mean" || mode === "meanfilt") {
+    const o = new Float32Array(d.length);
+    const hv = Math.floor(nv / 2), hx = Math.floor(nx / 2);
+    for (let t = 0; t < nt; t++) {
+      for (let s = 0; s < ns; s++) {
+        let sum = 0, count = 0;
+        for (let dt = -hx; dt <= hx; dt++) {
+          const tt = Math.max(0, Math.min(nt - 1, t + dt));
+          for (let ds = -hv; ds <= hv; ds++) {
+            const ss = Math.max(0, Math.min(ns - 1, s + ds));
+            sum += d[tt * ns + ss];
+            count++;
+          }
+        }
+        o[t * ns + s] = sum / count;
+      }
+    }
+    return { data: o, numTraces: nt, numSamples: ns };
+  }
+
+  const o = new Float32Array(d.length);
+  const hv = Math.floor(nv / 2), hx = Math.floor(nx / 2);
+  const windowVals = new Float64Array(nv * nx);
+  for (let t = 0; t < nt; t++) {
+    for (let s = 0; s < ns; s++) {
+      let wi = 0;
+      for (let dt = -hx; dt <= hx; dt++) {
+        const tt = Math.max(0, Math.min(nt - 1, t + dt));
+        for (let ds = -hv; ds <= hv; ds++) {
+          const ss = Math.max(0, Math.min(ns - 1, s + ds));
+          windowVals[wi++] = d[tt * ns + ss];
+        }
+      }
+      windowVals.subarray(0, wi).sort();
+      o[t * ns + s] = windowVals[Math.floor(wi / 2)];
+    }
+  }
+  return { data: o, numTraces: nt, numSamples: ns };
+}
+
+export function notchFilter(d, nt, ns, params = {}) {
+  const dtNs = safeNumber(params.dtNs ?? params.dt, 0.625);
+  const fNyq = 1 / (2 * dtNs * 1e-3);
+  const fNotchMHz = safeNumber(params.frequencyMHz ?? params.fNotchMHz ?? 50, 50);
+  const wo = 2 * Math.PI * fNotchMHz / (2 * fNyq);
+  const rez = Math.cos(wo), imz = Math.sin(wo);
+  const rez1 = 0.99 * rez, imz1 = 0.99 * imz;
+
+  const bR = [1, -2 * rez, rez * rez + imz * imz];
+  const aR = [1, -2 * rez1, rez1 * rez1 + imz1 * imz1];
+
+  const nfft = nextPow2(ns);
+  const HR = new Float64Array(nfft), HI = new Float64Array(nfft);
+  const bRpad = new Float64Array(nfft), bIpad = new Float64Array(nfft);
+  const aRpad = new Float64Array(nfft), aIpad = new Float64Array(nfft);
+  bRpad.set(bR); aRpad.set(aR);
+  fft(bRpad, bIpad); fft(aRpad, aIpad);
+  for (let k = 0; k < nfft; k++) {
+    const denom = aRpad[k] * aRpad[k] + aIpad[k] * aIpad[k];
+    HR[k] = (bRpad[k] * aRpad[k] + bIpad[k] * aIpad[k]) / Math.max(denom, 1e-12);
+    HI[k] = (-bRpad[k] * aIpad[k] + bIpad[k] * aRpad[k]) / Math.max(denom, 1e-12);
+  }
+  let hMax = 0;
+  for (let k = 0; k < nfft; k++) hMax = Math.max(hMax, Math.hypot(HR[k], HI[k]));
+  if (hMax > 1e-12) for (let k = 0; k < nfft; k++) { HR[k] /= hMax; HI[k] /= hMax; }
+
+  const o = new Float32Array(d.length);
+  for (let t = 0; t < nt; t++) {
+    const tr = new Float64Array(nfft), ti = new Float64Array(nfft);
+    tr.set(d.subarray(t * ns, t * ns + ns));
+    fft(tr, ti);
+    for (let k = 0; k < nfft; k++) {
+      const nr = tr[k] * HR[k] - ti[k] * HI[k];
+      const ni = tr[k] * HI[k] + ti[k] * HR[k];
+      tr[k] = nr * HR[k] - ni * (-HI[k]);
+      ti[k] = nr * (-HI[k]) + ni * HR[k];
+    }
+    fft(tr, ti, true);
+    for (let s = 0; s < ns; s++) o[t * ns + s] = tr[s];
+  }
+  return { data: o, numTraces: nt, numSamples: ns };
+}
+
+export function predictiveDecon(d, nt, ns, params = {}) {
+  const dtNs = safeNumber(params.dtNs ?? params.dt, 0.625);
+  let nf = clamp(Math.floor(safeNumber(params.operatorLength ?? params.nfSamples ?? 32, 32)), 2, Math.floor(ns / 2) - 1);
+  let lp = clamp(Math.floor(safeNumber(params.predictionLength ?? params.lpSamples ?? 1, 1)), 1, nf - 1);
+  const mu = clamp(safeNumber(params.muPercent ?? params.mu ?? params.prewhitening ?? 5, 5), 0, 100);
+
+  if (params.operatorLengthNs != null) nf = clamp(Math.floor(safeNumber(params.operatorLengthNs, 32) / dtNs), 2, Math.floor(ns / 2) - 1);
+  if (params.predictionLengthNs != null) lp = clamp(Math.floor(safeNumber(params.predictionLengthNs, 1) / dtNs), 1, nf - 1);
+
+  const o = new Float32Array(d.length);
+  for (let it = 0; it < nt; it++) {
+    const tr = d.subarray(it * ns, it * ns + ns);
+    const cc = new Float64Array(nf);
+    for (let lag = 0; lag < nf; lag++) {
+      let sum = 0;
+      for (let i = 0; i < ns - lag; i++) sum += tr[i + lag] * tr[i];
+      cc[lag] = sum;
+    }
+
+    const R = Array.from({ length: nf }, () => new Float64Array(nf));
+    const prewhite = cc[0] * mu / 100;
+    for (let i = 0; i < nf; i++) {
+      for (let j = 0; j < nf; j++) {
+        const lag = Math.abs(i - j);
+        R[i][j] = cc[lag] + (i === j ? prewhite : 0);
+      }
+    }
+
+    const rhs = new Float64Array(nf);
+    for (let i = 0; i < nf; i++) rhs[i] = cc[lp + i];
+
+    const f = solveLinearSystem(R, rhs);
+
+    for (let s = 0; s < ns; s++) {
+      let pred = tr[s];
+      if (lp === 1) {
+        for (let k = 0; k < nf && s - k - 1 >= 0; k++) pred -= f[k] * tr[s - k - 1];
+      } else {
+        for (let k = 0; k < nf && s - k - lp >= 0; k++) pred -= f[k] * tr[s - k - lp];
+      }
+      o[it * ns + s] = pred;
+    }
+  }
+  return { data: o, numTraces: nt, numSamples: ns, operatorLength: nf, predictionLength: lp };
+}
+
+export function staticCorrection(d, nt, ns, params = {}) {
+  const dtNs = safeNumber(params.dtNs ?? params.dt, 0.625);
+  const wv = clamp(safeNumber(params.wv ?? params.weatheringVelocity ?? 0.1, 0.1), 0.001, 0.2998);
+  const swv = clamp(safeNumber(params.swv ?? params.subweatheringVelocity ?? 0.1, 0.1), 0.001, 0.2998);
+  const sdel = safeNumber(params.sdel ?? params.datumElevation ?? 0, 0);
+  const direction = safeNumber(params.direction ?? params.shiftDirection ?? -1, -1);
+  const elevations = params.elevation || params.elevations || params.posZ || [];
+
+  const o = new Float32Array(d.length);
+  const tt = new Float64Array(ns);
+  for (let s = 0; s < ns; s++) tt[s] = s * dtNs;
+
+  for (let ix = 0; ix < nt; ix++) {
+    const relev = Array.isArray(elevations) ? (elevations[ix] ?? elevations[0] ?? 0) : (typeof elevations === "number" ? elevations : 0);
+    const selev = relev;
+    const tsd = (-selev + sdel) / swv;
+    const tstat = tsd;
+
+    for (let s = 0; s < ns; s++) {
+      const ts = tt[s] + direction * tstat;
+      o[ix * ns + s] = cubicSample(d.subarray(ix * ns, ix * ns + ns), ts / dtNs, 0);
+    }
+  }
+  return { data: o, numTraces: nt, numSamples: ns };
 }

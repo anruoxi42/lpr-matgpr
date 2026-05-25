@@ -54,6 +54,11 @@ self.onmessage = ({ data }) => {
     else if (op === "bad-traces") r = A.removeBadTraces(d, nt, ns, params.ranges, { x: dataset.meta?.x || dataset.meta?.distanceAxisM });
     else if (op === "dewow") r = A.dewow(d, nt, ns);
     else if (op === "equalize") r = A.equalize(d, nt, ns);
+    else if (op === "dzt-gain") {
+      const gs = typeof params.gain === "string" ? params.gain : "";
+      const gdb = gs ? gs.split(",").map(Number).filter(n => Number.isFinite(n)) : [];
+      r = A.removeDztGain(d, nt, ns, { gainDb: gdb });
+    }
     else if (op === "resample-time") r = A.resample(d, nt, ns, "time", params.samples, { ...params, dtNs: axes.dtNs });
     else if (op === "resample-scan" || op === "equal-spacing") r = A.resample(d, nt, ns, "scan", params.traces, { ...params, dxM: axes.dxM });
     else if (op === "global-bg") r = A.backgroundRemove(d, nt, ns);
@@ -73,12 +78,16 @@ self.onmessage = ({ data }) => {
     else if (op === "stolt") r = A.stoltMigration(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
     else if (op === "gazdag") r = A.gazdagMigration(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
     else if (op === "split-step") r = A.splitStepMigration(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
-    else if (op === "pspi") r = A.simpleMigration(d, nt, ns, params.velocity, params.dt, params.dx);
+    else if (op === "pspi") r = A.pspiMigration(d, nt, ns, { ...params, dtNs: axes.dtNs, dxM: axes.dxM });
     else if (op === "time-depth") r = A.timeDepth(d, nt, ns, { ...params, dtNs: axes.dtNs });
     else if (op === "instantaneous") r = A.instantaneous(d, nt, ns, { ...params, dtNs: axes.dtNs });
     else if (op === "centroid") r = A.centroidFrequency(d, nt, ns);
+    else if (op === "mean-median-filter") r = A.meanMedianFilter(d, nt, ns, params);
+    else if (op === "notch-filter") r = A.notchFilter(d, nt, ns, { ...params, dtNs: axes.dtNs });
+    else if (op === "predc") r = A.predictiveDecon(d, nt, ns, { ...params, dtNs: axes.dtNs });
+    else if (op === "static-correction") r = A.staticCorrection(d, nt, ns, { ...params, dtNs: axes.dtNs });
     else if (op === "geology-model") r = A.geologicModel(d, nt, ns, params);
-    else throw new Error("该功能已建立入口，算法将在下一阶段补全。");
+    else throw new Error("Unknown op: " + op);
     r = withUpdatedMeta(r, dataset, params);
     const transfers = r.data?.buffer ? [r.data.buffer] : [];
     if (r.modelData?.buffer) transfers.push(r.modelData.buffer);
