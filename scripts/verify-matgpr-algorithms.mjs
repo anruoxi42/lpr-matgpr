@@ -20,6 +20,10 @@ import {
   gazdagMigration,
   timeDepth
 } from "../src/processing/algorithms.js";
+import { parseHadText, parseHcdFile } from "../src/io/hcd.js";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -171,5 +175,53 @@ finite(attenuation.data, "attenuation analysis");
 assert(attenuation.numTraces === 4 && attenuation.numSamples === ns, "attenuation analysis should return four curves");
 assert(Number.isFinite(attenuation.powerLaw[0]) && Number.isFinite(attenuation.powerLaw[1]), "invalid power-law fit");
 assert(Number.isFinite(attenuation.exponential[0]) && Number.isFinite(attenuation.exponential[1]), "invalid exponential fit");
+
+function arrayBufferFromNodeBuffer(buffer) {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const chDir = join(root, "..", "ch");
+if (existsSync(chDir)) {
+  const hadFiles = readdirSync(chDir).filter(name => name.toLowerCase().endsWith(".had")).sort();
+  let checkedPairs = 0;
+  for (const name of hadFiles) {
+    const hadPath = join(chDir, name);
+    if (statSync(hadPath).size === 0) continue;
+    const had = parseHadText(readFileSync(hadPath, "utf8"));
+    const hcdPath = join(chDir, name.replace(/\.had$/i, ".hcd"));
+    if (!existsSync(hcdPath) || statSync(hcdPath).size === 0) continue;
+    const expectedBytes = had.traces * had.samples * (had.dataBit / 8);
+    assert(statSync(hcdPath).size === expectedBytes, `${name} HCD size does not match HAD parameters`);
+    checkedPairs++;
+  }
+  assert(checkedPairs > 0, "no non-empty HCD/HAD pairs were verified");
+
+  const hcd16Had = parseHadText(readFileSync(join(chDir, "900_0.had"), "utf8"));
+  const hcd16 = parseHcdFile(arrayBufferFromNodeBuffer(readFileSync(join(chDir, "900_0.hcd"))), hcd16Had);
+  finite(hcd16.data, "HCD 16-bit import");
+  assert(hcd16.numSamples === 1024 && hcd16.numTraces === 6395, "900_0 HCD dimensions are wrong");
+  assert(Math.abs(hcd16.meta.dtNs - 100 / 1024) < 1e-9, "900_0 HCD dtNs is wrong");
+  assert(hcd16.meta.sourceFormat === ".HCD" && hcd16.meta.dataBit === 16, "900_0 HCD metadata is wrong");
+
+  const hcd16Manual = parseHcdFile(arrayBufferFromNodeBuffer(readFileSync(join(chDir, "900_0.hcd"))), {
+    dataBit: 16,
+    samples: 1024,
+    traces: 6395,
+    timeWindowNs: 100,
+    frequencyMHz: 10240,
+    dxM: 0.01
+  });
+  assert(hcd16Manual.numSamples === hcd16.numSamples && hcd16Manual.numTraces === hcd16.numTraces, "manual HCD parameters produced wrong dimensions");
+  assert(hcd16Manual.data[0] === hcd16.data[0], "manual HCD parameters did not reproduce sample data");
+
+  const hcd32Had = parseHadText(readFileSync(join(chDir, "1050-9-7-111_1.had"), "utf8"));
+  const hcd32 = parseHcdFile(arrayBufferFromNodeBuffer(readFileSync(join(chDir, "1050-9-7-111_1.hcd"))), hcd32Had);
+  finite(hcd32.data, "HCD 32-bit import");
+  assert(hcd32.numSamples === 1100 && hcd32.numTraces === 5707, "1050-9-7-111_1 HCD dimensions are wrong");
+  assert(hcd32.meta.dataBit === 32 && hcd32.meta.dxM === 0.01, "1050-9-7-111_1 HCD metadata is wrong");
+} else {
+  console.warn("Skipping HCD sample verification because ../ch was not found");
+}
 
 console.log("MATGPR algorithm verification passed");

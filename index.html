@@ -11,7 +11,7 @@
     <header class="topbar">
       <div>
         <div class="brand">LPR matGPR</div>
-        <div class="sub">CE-3 .2B 优先 · Current/Input/Output 数据流</div>
+        <div class="sub">CE-3 .2B + HCD/HAD · Current/Input/Output 数据流</div>
       </div>
       <div id="dataset-title" class="dataset-title">未加载数据</div>
       <div class="status-dot"><span></span> 本地服务</div>
@@ -121,7 +121,7 @@
     <main class="workspace">
       <section id="page-radar" class="page active">
         <div class="toolbar">
-          <input id="file-input" type="file" accept=".2b,.2B" multiple hidden>
+          <input id="file-input" type="file" accept=".2b,.2B,.hcd,.HCD,.had,.HAD" multiple hidden>
           <button data-action="zoom-in" title="放大">Zoom +</button>
           <button data-action="zoom-out" title="缩小">Zoom -</button>
           <button data-action="zoom-fit" title="全图">Fit</button>
@@ -139,7 +139,7 @@
           <button id="depth-axis-toggle" data-action="toggle-depth-axis">深度轴</button>
           <button data-action="open-trace">波形</button>
           <button data-popup="toolbar-process-window">处理</button>
-          <button class="primary" data-action="open-import">导入 .2B</button>
+          <button class="primary" data-action="open-import">导入数据</button>
           <button data-action="open-trace">道查看器</button>
           <button data-action="open-spectrum">频谱查看器</button>
           <button data-action="hold-output">Hold</button>
@@ -163,8 +163,8 @@
           <label>Max <input id="amp-max" type="number" value="10" step="0.5"></label>
         </div>
         <div id="drop-zone" class="drop-zone">
-          <strong>拖拽 .2B 文件到此处，或点击“导入 .2B”</strong>
-          <span>支持 CE-3 LPR 8307 字节/道 · 2048 样点 · float32 小端样点</span>
+          <strong>拖拽 .2B 或 .hcd/.had 文件到此处，或点击“导入数据”</strong>
+          <span>支持 CE-3 .2B；HCD 请同时选择同名 .hcd 与 .had，缺 .had 时可手动填写参数</span>
         </div>
         <div id="radar-wrap" class="radar-wrap">
           <canvas id="radar-canvas"></canvas>

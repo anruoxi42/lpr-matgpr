@@ -223,7 +223,7 @@ export class RadarRenderer {
     ctx.fillRect(0, 0, this.w || 1, this.h || 1);
     if (!this.dataset || !this.view) {
       ctx.fillStyle = "#7890aa"; ctx.textAlign = "center"; ctx.font = "14px Segoe UI";
-      ctx.fillText("请先导入 .2B 数据", (this.w || 1) / 2, (this.h || 1) / 2);
+      ctx.fillText("请先导入数据", (this.w || 1) / 2, (this.h || 1) / 2);
       return;
     }
     const p = this.plot();

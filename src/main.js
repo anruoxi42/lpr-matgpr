@@ -1223,4 +1223,19 @@ async function computeAttenuation() {
   }
 }
 function simpleVelocityCalc() {
-  const epsr = Number(prompt("相对介电常数 εr", "9"
+  const epsr = Number(prompt("相对介电常数 εr", "9") || 9);
+  const v = 0.299792458 / Math.sqrt(epsr);
+  toast(`V = ${v.toFixed(4)} m/ns`);
+}
+function forwardModel() {
+  const nt = 300, ns = 512, data = new Float32Array(nt*ns);
+  for (const o of model.objects) {
+    const x0 = Math.round((o.x / Math.max(1, $("#model-canvas").clientWidth)) * nt), z0 = Math.round((o.y / Math.max(1, $("#model-canvas").clientHeight)) * ns), amp = (o.epsr || 10) / 10;
+    for (let t=0;t<nt;t++){ const s=Math.round(Math.sqrt(z0*z0+(t-x0)*(t-x0)*.8)); if(s>=0&&s<ns)data[t*ns+s]+=amp; }
+  }
+  store.setOutput({ data, numTraces:nt, numSamples:ns, name:"forward_model" }, { name:"正演模拟", op:"forward", params:{objects:model.objects.length} });
+  displaySource = "output"; $("#display-mode").value = "output"; toast("正演模拟已生成 Output Data");
+}
+
+bindUi();
+refresh();
