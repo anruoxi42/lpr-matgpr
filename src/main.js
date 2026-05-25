@@ -1,7 +1,7 @@
 import { RECORD_SIZE, SAMPLES_PER_TRACE, parse2BFile, write2BFile, writeMgpJson, writeSEGYLike, writeSEGYFile, writeDZTFile } from "./io/twoB.js";
 import { parseHadText, parseHcdFile } from "./io/hcd.js";
 import { IpdStore } from "./processing/ipdStore.js";
-import { depthAxisFromVofh, spectrum, fkSpectrum } from "./processing/algorithms.js";
+import { depthAxisFromVofh, parseVofh, spectrum, fkSpectrum } from "./processing/algorithms.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
 
 const store = new IpdStore();
@@ -22,6 +22,7 @@ let velocityPreviewPoint = null;
 let velocityFixedPoint = null;
 let depthAxisEnabled = false;
 let currentVofhText = "0.1,0";
+let lastGeoDatasetKey = "";
 
 const $ = sel => document.querySelector(sel);
 const $$ = sel => [...document.querySelectorAll(sel)];
@@ -105,6 +106,73 @@ store.addEventListener("change", refresh);
 
 function formatVofh(vofh) {
   return Array.isArray(vofh) ? vofh.map(row => `${row[0]},${row[1] ?? 0}`).join("\n") : (typeof vofh === "string" ? vofh : "");
+}
+
+function finiteNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function datasetDtNs(ds) {
+  return finiteNumber(ds?.meta?.dtNs ?? ds?.dtNs, 0.625);
+}
+
+function datasetDxM(ds) {
+  return finiteNumber(ds?.meta?.dxM ?? ds?.dxM, 0.05);
+}
+
+function firstFiniteAxisValue(axis) {
+  if (!axis?.length) return NaN;
+  for (let i = axis.length - 1; i >= 0; i--) {
+    const value = Number(axis[i]);
+    if (Number.isFinite(value)) return value;
+  }
+  return NaN;
+}
+
+function velocityFromGeoControl() {
+  const inputVelocity = finiteNumber($("#geo-velocity")?.value, NaN);
+  if (Number.isFinite(inputVelocity)) return inputVelocity;
+  return parseVofh(currentVofhText || "0.1,0")[0]?.[0] || 0.1;
+}
+
+function inferredDepthMax(ds, dtNs = datasetDtNs(ds), velocity = velocityFromGeoControl()) {
+  if (!ds) return 0;
+  const axisDepth = firstFiniteAxisValue(ds.depthAxisM || ds.meta?.depthAxisM);
+  if (Number.isFinite(axisDepth) && axisDepth > 0) return axisDepth;
+  const depthStep = finiteNumber(ds.depthStep ?? ds.meta?.depthStep, NaN);
+  if (Number.isFinite(depthStep)) return Math.max(0, ds.numSamples - 1) * depthStep;
+  return Math.max(0, ds.numSamples - 1) * dtNs * velocity / 2;
+}
+
+function formatDepthInput(value) {
+  if (!Number.isFinite(value)) return "";
+  return value >= 20 ? value.toFixed(1) : value.toFixed(2);
+}
+
+function updateGeoDepthFromControls(force = false) {
+  const ds = currentDisplayed();
+  const depthEl = $("#geo-depth");
+  if (!ds || !depthEl) return;
+  if (!force && depthEl.dataset.manual === "true") return;
+  const dtNs = finiteNumber($("#geo-dt")?.value, datasetDtNs(ds));
+  const velocity = velocityFromGeoControl();
+  depthEl.value = formatDepthInput(inferredDepthMax(ds, dtNs, velocity));
+  depthEl.dataset.manual = "false";
+}
+
+function syncGeoControlsFromDataset(force = false) {
+  const ds = currentDisplayed();
+  if (!ds) return;
+  const key = [ds.id || ds.name || "", ds.numTraces, ds.numSamples, datasetDtNs(ds), datasetDxM(ds)].join("|");
+  if (!force && key === lastGeoDatasetKey) return;
+  const dtEl = $("#geo-dt"), dxEl = $("#geo-dx"), velEl = $("#geo-velocity"), depthEl = $("#geo-depth");
+  if (dtEl) dtEl.value = datasetDtNs(ds).toFixed(4);
+  if (dxEl) dxEl.value = datasetDxM(ds).toFixed(4);
+  if (velEl && !Number.isFinite(Number(velEl.value))) velEl.value = "0.100";
+  if (depthEl) depthEl.dataset.manual = "false";
+  lastGeoDatasetKey = key;
+  updateGeoDepthFromControls(true);
 }
 
 function fallbackDepthAxis(ds) {
@@ -536,7 +604,10 @@ function switchPage(name) {
   if (name === "velocity") renderVelocity();
   if (name === "model") renderModel();
   if (name === "three") renderThree();
-  if (name === "interpret") drawGeologyResult();
+  if (name === "interpret") {
+    syncGeoControlsFromDataset();
+    drawGeologyResult();
+  }
 }
 
 function openFloat(id) {
@@ -1016,15 +1087,19 @@ function exportCsv(ds) {
 async function runGeologyModel() {
   const ds = currentDisplayed();
   if (!ds) return toast("请先导入数据", "warn");
+  syncGeoControlsFromDataset();
+  const velocity = finiteNumber($("#geo-velocity")?.value, 0.1);
+  const dt = finiteNumber($("#geo-dt")?.value, datasetDtNs(ds));
+  const dx = finiteNumber($("#geo-dx")?.value, datasetDxM(ds));
   const params = {
-    velocity: Number($("#geo-velocity")?.value || 0.1),
-    dt: Number($("#geo-dt")?.value || 0.3125),
-    dx: Number($("#geo-dx")?.value || 0.05),
+    velocity,
+    dt,
+    dx,
     loMHz: Number($("#geo-lo")?.value || 20),
     hiMHz: Number($("#geo-hi")?.value || 900),
     bgWidth: Number($("#geo-bg")?.value || 25),
     agcWindow: Number($("#geo-agc")?.value || 80),
-    modelDepthMax: Number($("#geo-depth")?.value || 24),
+    modelDepthMax: finiteNumber($("#geo-depth")?.value, inferredDepthMax(ds, dt, velocity)),
     preprocess: {
       dewow: $("#geo-use-dewow")?.checked !== false,
       dc: $("#geo-use-dc")?.checked !== false,
@@ -1038,7 +1113,17 @@ async function runGeologyModel() {
   $("#footer-status").textContent = "正在自动提取界面并生成地质模型";
   try {
     geologyResult = await runWorker("geology-model", ds, params);
-    store.setOutput({ data: geologyResult.data, numTraces: geologyResult.numTraces, numSamples: geologyResult.numSamples, name: `${ds.name || "data"}_geology_processed`, meta: ds.meta }, { name: "自动地质建模", op: "geology-model", params });
+    store.setOutput({
+      data: geologyResult.data,
+      numTraces: geologyResult.numTraces,
+      numSamples: geologyResult.numSamples,
+      name: `${ds.name || "data"}_geology_processed`,
+      meta: geologyResult.meta || ds.meta,
+      dtNs: geologyResult.dtNs || params.dt,
+      dxM: geologyResult.dxM || params.dx,
+      depthStep: geologyResult.depthStep,
+      depthAxisM: geologyResult.meta?.depthAxisM
+    }, { name: "自动地质建模", op: "geology-model", params });
     displaySource = "output"; $("#display-mode").value = "output";
     drawGeologyResult();
     $("#footer-status").textContent = "自动地质建模完成，Output Data 已生成";
@@ -1288,6 +1373,9 @@ function bindUi() {
     if (e.target.dataset.modelTool) { modelTool = e.target.dataset.modelTool; toast(`建模工具：${modelTool}`); }
   });
   $("#display-mode").onchange = e => { displaySource = e.target.value; refresh(); };
+  $("#geo-dt")?.addEventListener("input", () => updateGeoDepthFromControls());
+  $("#geo-velocity")?.addEventListener("input", () => updateGeoDepthFromControls());
+  $("#geo-depth")?.addEventListener("input", () => { $("#geo-depth").dataset.manual = "true"; });
   $("#colormap").onchange = e => radar.setColormap(e.target.value);
   $("#amp-min").onchange = () => radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
   $("#amp-max").onchange = () => radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
