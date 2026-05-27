@@ -1,5 +1,5 @@
 import { RECORD_SIZE, SAMPLES_PER_TRACE, parse2BFile, write2BFile, writeMgpJson, writeSEGYLike, writeSEGYFile, writeDZTFile } from "./io/twoB.js";
-import { parseHadText, parseHcdFile } from "./io/hcd.js";
+import { HCD_DEFAULT_AMP, parseHadText, parseHcdFile } from "./io/hcd.js";
 import { IpdStore } from "./processing/ipdStore.js";
 import { depthAxisFromVofh, parseVofh, spectrum, fkSpectrum } from "./processing/algorithms.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
@@ -16,6 +16,7 @@ let radarSelections = [];
 let radarAnnotations = [];
 let lastMergedSelection = null;
 let geologyResult = null;
+let geologyPipelineState = {};
 let dataManagerSelection = new Set();
 let velocityRenderer = null;
 let velocityPreviewPoint = null;
@@ -23,6 +24,36 @@ let velocityFixedPoint = null;
 let depthAxisEnabled = false;
 let currentVofhText = "0.1,0";
 let lastGeoDatasetKey = "";
+
+const geoPipelineDefs = [
+  ["geo-energy-envelope", "能量包络", "计算反射振幅绝对值，突出强反射界面。"],
+  ["geo-smooth-2d", "二维平滑", "沿时间和道向平滑能量图，降低孤立噪声。"],
+  ["geo-trace-peaks", "逐道峰值检测", "在每道内寻找候选反射峰，并按最小间距筛选。"],
+  ["geo-depth-histogram", "深度直方图聚类", "统计峰值深度分布，寻找全剖面稳定深度带。"],
+  ["geo-cluster-peaks", "聚类生成", "围绕直方图峰值聚合反射点，估计候选层位中心。"],
+  ["geo-merge-clusters", "聚类合并", "合并距离很近的候选层，避免重复层位。"],
+  ["geo-support-select", "支持度筛选", "保留横向支持度足够的候选层位。"],
+  ["geo-track-horizons", "层位追踪", "围绕候选深度逐道搜索能量最大点生成层位线。"],
+  ["geo-line-smooth", "线平滑", "平滑层位线，减少锯齿和局部跳变。"],
+  ["geo-stratigraphy", "层序约束", "强制深层界面位于浅层界面之下，保持地层顺序。"],
+  ["geo-classify-model", "地层分类模型", "根据层位线把剖面划分为分层地质模型。"]
+];
+
+const algorithmDocs = [
+  ["不良道插值替换", "沿道向找相邻有效道，对坏道位置做线性/三次插值，保留原始道数和采样点。", "输入坏道范围，如 5-9,22；适合空道、饱和道、异常尖峰道修复。输出进入 Output Data。"],
+  ["重采样/等间距", "使用 sinc 插值在时间轴或扫描轴重新采样，统一样点数、道数或空间间距。", "设置目标 samples/traces、当前 dt/dx 与 sinc 半阶；用于多剖面对齐、.2B 导出前恢复 2048 样点。"],
+  ["AGC/增益", "用局部能量窗或衰减曲线估计随深度变化的振幅补偿系数，增强深部弱反射。", "Standard/Gaussian AGC 设置窗口；Power/Amplitude Gain 设置幂次或衰减曲线。结果只进 Output Data，确认后 Hold。"],
+  ["K-L/SVDS", "把雷达数据矩阵分解为主成分，连续背景通常集中在低阶分量，异常或噪声进入残差。", "设置 components 和 output=model/residual；适合提取背景模型、突出局部异常或压制低秩干扰。"],
+  ["F-X Deconvolution", "在频率-空间域用相邻道预测关系重建相干事件，随机噪声因不可预测被削弱。", "设置预测算子长度、预白化和处理频带；适合横向连续反射增强。"],
+  ["Sparse Deconvolution", "以 Ricker 子波卷积模型反演稀疏反射系数，用 L1 正则压缩波形。", "设置主频、子波长度、mu 和迭代次数；输出 reflectivity 可突出薄层界面。"],
+  ["Predictive Deconvolution", "根据自相关建立预测误差滤波器，削弱周期性振铃、多次波或拖尾。", "设置 operatorLength、predictionLength 和预白化比例；常用于振铃明显的数据。"],
+  ["Stolt/Gazdag/PSPI/Split-step 偏移", "依据电磁波传播速度把绕射双曲线和倾斜反射回归到地下真实位置。", "输入速度或 vofh、dt/dx、dz/zMax；Stolt/Gazdag 偏 1-D 速度，PSPI/Split-step 支持更复杂速度近似。"],
+  ["时深转换", "按层状速度模型把双程走时采样映射成深度采样。", "输入 vofh=[velocity, thickness] 与 dz；结果带 depthAxisM，可在雷达剖面切换深度轴。"],
+  ["瞬时属性/质心频率", "Hilbert 解析信号给出包络、相位、瞬时频率；质心频率表示频谱能量重心。", "用于识别强反射、相位突变、频散和介质变化；结果进入 Output Data 或曲线窗口。"],
+  ["衰减分析", "统计每个深度样点的解析信号功率，并拟合 power-law 与 exponential 衰减曲线。", "用于判断介质吸收、深部能量衰减和资料质量；结果在曲线窗口显示并可保存为 Output Data。"],
+  ["静校正", "根据高程、表层速度和基准面计算每道时间零点修正量，校正近地表起伏影响。", "输入高程序列、表层/次表层速度与基准面；适合地表不平或天线高度变化数据。"],
+  ["地质建模流水线", "能量包络 -> 二维平滑 -> 峰值 -> 深度直方图聚类 -> 聚类合并 -> 支持度筛选 -> 层位追踪 -> 线平滑 -> 层序约束 -> 地层分类。", "可一键自动追踪，也可在 Geologic Modeling 地质建模页逐步运行，每步都会显示用途和中间统计。"]
+];
 
 const $ = sel => document.querySelector(sel);
 const $$ = sel => [...document.querySelectorAll(sel)];
@@ -97,6 +128,7 @@ function refresh() {
     row("格式", store.current.meta?.sourceFormat || ".2B")
   ].join("") : "暂无数据";
   $("#history-panel").innerHTML = store.ipd?.history.length ? store.ipd.history.map((h, i) => `<div class="history-item"><b>${i + 1}. ${h.name}</b><br><span>${h.createdAt || ""}</span><br><code>${JSON.stringify(h.params || {})}</code></div>`).join("") : "暂无历史";
+  renderSideDatasetList();
   updateVelocityList();
   renderDataManager();
   renderThree();
@@ -206,6 +238,11 @@ function fileStem(name) {
 
 function finishImport(parsed, file) {
   store.loadDataset({ ...parsed, name: file.name, fileSize: file.size, loadedAt: new Date().toLocaleString("zh-CN") });
+  if (parsed.meta?.sourceFormat === ".HCD") {
+    $("#amp-min").value = parsed.meta.displayAmpMin ?? HCD_DEFAULT_AMP.min;
+    $("#amp-max").value = parsed.meta.displayAmpMax ?? HCD_DEFAULT_AMP.max;
+    radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
+  }
   clearInteractionState();
   toast(`${file.name} 导入成功`);
   $("#footer-status").textContent = "导入完成";
@@ -217,72 +254,10 @@ async function read2BImport(file) {
   finishImport(parse2BFile(await file.arrayBuffer()), file);
 }
 
-function ensureHcdManualDialog() {
-  let dlg = $("#hcd-manual-dialog");
-  if (dlg) return dlg;
-  dlg = document.createElement("dialog");
-  dlg.id = "hcd-manual-dialog";
-  dlg.innerHTML = `
-    <form method="dialog">
-      <h2>HCD 手动参数</h2>
-      <p class="muted">未同时选择同名 .had 文件，请填写 .hcd 样点矩阵参数。</p>
-      <div class="dialog-fields">
-        <label>DATA BIT<input id="hcd-bit" value="16"></label>
-        <label>SAMPLES<input id="hcd-samples" value=""></label>
-        <label>TRACE NUMBER<input id="hcd-traces" value=""></label>
-        <label>TIMEWINDOW ns<input id="hcd-timewindow" value=""></label>
-        <label>FREQUENCY MHz<input id="hcd-frequency" value=""></label>
-        <label>TRACE INCREMENT m<input id="hcd-dx" value="0.01"></label>
-        <label>Endian
-          <select id="hcd-endian">
-            <option value="little">little-endian</option>
-            <option value="big">big-endian</option>
-          </select>
-        </label>
-      </div>
-      <menu>
-        <button value="cancel">取消</button>
-        <button id="hcd-manual-run" value="default" class="primary">导入 HCD</button>
-      </menu>
-    </form>`;
-  document.body.appendChild(dlg);
-  return dlg;
-}
-
-function requestHcdManualParams(file) {
-  const dlg = ensureHcdManualDialog();
-  const updateTraceHint = () => {
-    const bytes = Number($("#hcd-bit")?.value || 16) / 8 || 2;
-    const samples = Number($("#hcd-samples")?.value || 0);
-    $("#hcd-traces").placeholder = file?.size && samples > 0 ? String(Math.floor(file.size / (samples * bytes))) : "";
-  };
-  $("#hcd-bit").oninput = updateTraceHint;
-  $("#hcd-samples").oninput = updateTraceHint;
-  updateTraceHint();
-  return new Promise(resolve => {
-    dlg.onclose = () => {
-      if (dlg.returnValue !== "default") return resolve(null);
-      resolve({
-        dataBit: Number($("#hcd-bit").value),
-        samples: Number($("#hcd-samples").value),
-        traces: Number($("#hcd-traces").value),
-        timeWindowNs: Number($("#hcd-timewindow").value),
-        frequencyMHz: Number($("#hcd-frequency").value),
-        dxM: Number($("#hcd-dx").value || 1),
-        littleEndian: $("#hcd-endian").value !== "big"
-      });
-    };
-    dlg.showModal();
-  });
-}
-
 async function readHcdImport(hcdFile, hadFile = null) {
   $("#footer-status").textContent = `正在解析 ${hcdFile.name}`;
-  const params = hadFile ? parseHadText(await hadFile.text()) : await requestHcdManualParams(hcdFile);
-  if (!params) {
-    $("#footer-status").textContent = "HCD 导入已取消";
-    return;
-  }
+  if (!hadFile) throw new Error("HCD 导入需要同时选择同名 .had 文件");
+  const params = parseHadText(await hadFile.text());
   finishImport(parseHcdFile(await hcdFile.arrayBuffer(), params), hcdFile);
 }
 
@@ -321,40 +296,36 @@ const processDefs = {
   "bad-traces": ["不良道插值替换", [{ id: "ranges", label: "坏道范围，例如 5-9,22", value: "" }]],
   "remove-dc": ["去均值 Remove DC", []],
   "dewow": ["去低频 Dewow", []],
-  "dzt-gain": ["Remove DZT header gain", [{ id: "gain", label: "Gain points (dB, comma-separated)", value: "0,2,4,6,8,10" }]],
+  "dzt-gain": ["Remove DZT header gain 去除 DZT 头增益", [{ id: "gain", label: "Gain points (dB, comma-separated) 增益点", value: "0,2,4,6,8,10" }]],
   "equalize": ["均衡轨迹", []],
   "resample-time": ["重采样时间轴", [{ id: "samples", label: "新样点数", value: 2048 }, { id: "dtNs", label: "当前 dt (ns)", value: 0.625 }, { id: "order", label: "sinc 半阶", value: 15 }]],
   "resample-scan": ["重采样扫描轴", [{ id: "traces", label: "新道数", value: 512 }, { id: "dxM", label: "当前 dx (m)", value: 0.05 }, { id: "order", label: "sinc 半阶", value: 15 }]],
   "equal-spacing": ["转换为等间距", [{ id: "traces", label: "等间距道数", value: 512 }, { id: "dxM", label: "当前 dx (m)", value: 0.05 }, { id: "order", label: "sinc 半阶", value: 15 }]],
-  agc: ["Standard AGC", [{ id: "windowNs", label: "AGC 窗口 (ns)", value: 31.25 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
-  gagc: ["Gaussian-tapered AGC", [{ id: "windowNs", label: "AGC 窗口 (ns)", value: 31.25 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }, { id: "eps", label: "EPS", value: 5e-7 }]],
-  "power-gain": ["Inverse Power Decay", [{ id: "power", label: "幂次 auto 或数字", value: "auto" }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
-  "amplitude-gain": ["Inverse Amplitude Decay", [{ id: "curve", label: "衰减曲线 median/mean", value: "median" }, { id: "order", label: "多指数阶数", value: 3 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
-  "global-bg": ["Remove Global Background", []],
-  horizontal: ["Suppress Horizontal Features", [{ id: "width", label: "滑动窗口道数", value: 25 }]],
-  dipping: ["Suppress Dipping Features", [{ id: "width", label: "滑动窗口道数", value: 25 }]],
-  "fir-frequency": ["FIR Frequency Filter", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "lo", label: "低频 MHz", value: 20 }, { id: "hi", label: "高频 MHz", value: 200 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
-  "fir-wavenumber": ["FIR Wavenumber Filter", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "loK", label: "低波数 m^-1", value: 0.2 }, { id: "hiK", label: "高波数 m^-1", value: 5 }, { id: "dxM", label: "dx (m)", value: 0.05 }]],
-  "fk-filter": ["F-K Filter", []],
-  "kl-filter": ["Karhunen-Loeve Filter", [{ id: "components", label: "主成分个数 P", value: 9 }, { id: "output", label: "输出 model/residual", value: "model" }]],
-  "fx-decon": ["F-X Deconvolution", [{ id: "operatorLength", label: "预测算子长度", value: 8 }, { id: "muPercent", label: "预白化 (%)", value: 1 }, { id: "flowMHz", label: "低频 MHz", value: 20 }, { id: "fhighMHz", label: "高频 MHz", value: 600 }]],
-  "sparse-decon": ["Sparse Deconvolution", [{ id: "frequencyMHz", label: "Ricker 主频 MHz", value: 100 }, { id: "lengthSamples", label: "子波长度样点", value: 64 }, { id: "mu", label: "L1 正则 mu", value: 0.01 }, { id: "iterations", label: "IRLS 迭代", value: 10 }, { id: "output", label: "输出 reflectivity/predicted", value: "reflectivity" }]],
-  "attenuation-analysis": ["Attenuation Analysis", []],
-  "mean-median-filter": ["Mean/Median Filter", [{ id: "mode", label: "Mode mean/median", value: "mean" }, { id: "vSize", label: "垂直窗口(样点)", value: 3 }, { id: "hSize", label: "水平窗口(道)", value: 3 }]],
-  "notch-filter": ["Notch Filter", [{ id: "frequencyMHz", label: "陷波频率 MHz", value: 50 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
-  predc: ["Predictive Deconvolution", [{ id: "operatorLength", label: "预测算子长度(样点)", value: 32 }, { id: "predictionLength", label: "预测距离(样点)", value: 1 }, { id: "muPercent", label: "预白化 (%)", value: 5 }]],
-  "static-correction": ["Static Corrections", [{ id: "elevation", label: "高程值(逗号分隔)", value: "0" }, { id: "swv", label: "表层速度 m/ns", value: .1 }, { id: "wv", label: "次表层速度 m/ns", value: .1 }]],
-  "mean-median-filter": ["Mean/Median Filter", [{ id: "mode", label: "Mode mean/median", value: "mean" }, { id: "vSize", label: "垂直窗口(样点)", value: 3 }, { id: "hSize", label: "水平窗口(道)", value: 3 }]],
-  "notch-filter": ["Notch Filter", [{ id: "frequencyMHz", label: "陷波频率 MHz", value: 50 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
-  predc: ["Predictive Deconvolution", [{ id: "operatorLength", label: "预测算子长度(样点)", value: 32 }, { id: "predictionLength", label: "预测距离(样点)", value: 1 }, { id: "muPercent", label: "预白化 (%)", value: 5 }]],
-  "static-correction": ["Static Corrections", [{ id: "elevation", label: "高程值(逗号分隔)", value: "0" }, { id: "swv", label: "表层速度 m/ns", value: .1 }, { id: "wv", label: "次表层速度 m/ns", value: .1 }]],
-  "advanced-placeholder": ["Tau-P / Curvelet / FDTD", []],
+  agc: ["Standard AGC 标准 AGC", [{ id: "windowNs", label: "AGC 窗口 (ns)", value: 31.25 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  gagc: ["Gaussian-tapered AGC 高斯窗 AGC", [{ id: "windowNs", label: "AGC 窗口 (ns)", value: 31.25 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }, { id: "eps", label: "EPS", value: 5e-7 }]],
+  "power-gain": ["Inverse Power Decay 反幂衰减增益", [{ id: "power", label: "幂次 auto 或数字", value: "auto" }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  "amplitude-gain": ["Inverse Amplitude Decay 反振幅衰减增益", [{ id: "curve", label: "衰减曲线 median/mean", value: "median" }, { id: "order", label: "多指数阶数", value: 3 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  "global-bg": ["Remove Global Background 去全局背景", []],
+  horizontal: ["Suppress Horizontal Features 压制水平同相轴", [{ id: "width", label: "滑动窗口道数", value: 25 }]],
+  dipping: ["Suppress Dipping Features 压制倾斜同相轴", [{ id: "width", label: "滑动窗口道数", value: 25 }]],
+  "fir-frequency": ["FIR Frequency Filter FIR 频率滤波", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "lo", label: "低频 MHz", value: 20 }, { id: "hi", label: "高频 MHz", value: 200 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  "fir-wavenumber": ["FIR Wavenumber Filter FIR 波数滤波", [{ id: "type", label: "类型 bp/lp/hp/bs", value: "bp" }, { id: "loK", label: "低波数 m^-1", value: 0.2 }, { id: "hiK", label: "高波数 m^-1", value: 5 }, { id: "dxM", label: "dx (m)", value: 0.05 }]],
+  "fk-filter": ["F-K Filter 频率-波数滤波", []],
+  "kl-filter": ["Karhunen-Loeve Filter K-L 主成分滤波", [{ id: "components", label: "主成分个数 P", value: 9 }, { id: "output", label: "输出 model/residual", value: "model" }]],
+  "fx-decon": ["F-X Deconvolution F-X 反褶积", [{ id: "operatorLength", label: "预测算子长度", value: 8 }, { id: "muPercent", label: "预白化 (%)", value: 1 }, { id: "flowMHz", label: "低频 MHz", value: 20 }, { id: "fhighMHz", label: "高频 MHz", value: 600 }]],
+  "sparse-decon": ["Sparse Deconvolution 稀疏反褶积", [{ id: "frequencyMHz", label: "Ricker 主频 MHz", value: 100 }, { id: "lengthSamples", label: "子波长度样点", value: 64 }, { id: "mu", label: "L1 正则 mu", value: 0.01 }, { id: "iterations", label: "IRLS 迭代", value: 10 }, { id: "output", label: "输出 reflectivity/predicted", value: "reflectivity" }]],
+  "attenuation-analysis": ["Attenuation Analysis 衰减分析", []],
+  "mean-median-filter": ["Mean/Median Filter 均值/中值滤波", [{ id: "mode", label: "Mode mean/median 模式", value: "mean" }, { id: "vSize", label: "垂直窗口(样点)", value: 3 }, { id: "hSize", label: "水平窗口(道)", value: 3 }]],
+  "notch-filter": ["Notch Filter 陷波滤波", [{ id: "frequencyMHz", label: "陷波频率 MHz", value: 50 }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
+  predc: ["Predictive Deconvolution 预测反褶积", [{ id: "operatorLength", label: "预测算子长度(样点)", value: 32 }, { id: "predictionLength", label: "预测距离(样点)", value: 1 }, { id: "muPercent", label: "预白化 (%)", value: 5 }]],
+  "static-correction": ["Static Corrections 静校正", [{ id: "elevation", label: "高程值(逗号分隔)", value: "0" }, { id: "swv", label: "表层速度 m/ns", value: .1 }, { id: "wv", label: "次表层速度 m/ns", value: .1 }]],
+  "advanced-placeholder": ["Tau-P / Curvelet / FDTD τ-p/曲波/正演", []],
   instantaneous: ["瞬时属性", [{ id: "attr", label: "属性 amplitude/atan/atan2/unwrapped/ifreq", value: "amplitude" }, { id: "dtNs", label: "dt (ns)", value: 0.625 }]],
-  stolt: ["1-D F-K / Stolt Migration", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
-  gazdag: ["1-D Phase-shift / Gazdag", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
-  "time-depth": ["Time-to-Depth Conversion", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dzM", label: "深度采样 m", value: .02 }]],
-  pspi: ["2-D PSPI Migration", [{ id: "velocity", label: "参考速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }, { id: "dzM", label: "深度步长 m", value: .02 }, { id: "zMaxM", label: "最大深度 m (可空)", value: "" }]],
-  "split-step": ["2-D Split-step Fourier", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }, { id: "dzM", label: "深度步长 m", value: .02 }, { id: "zMaxM", label: "最大深度 m (可空)", value: "" }, { id: "fMaxGHz", label: "最高频率 GHz (可空)", value: "" }, { id: "q", label: "Q (可空)", value: "" }, { id: "antennaFreqMHz", label: "天线频率 MHz (可空)", value: "" }]]
+  stolt: ["1-D F-K / Stolt Migration Stolt 偏移", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
+  gazdag: ["1-D Phase-shift / Gazdag 相移偏移", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }]],
+  "time-depth": ["Time-to-Depth Conversion 时深转换", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dzM", label: "深度采样 m", value: .02 }]],
+  pspi: ["2-D PSPI Migration PSPI 偏移", [{ id: "velocity", label: "参考速度 m/ns", value: .1 }, { id: "dt", label: "dt ns", value: .625 }, { id: "dx", label: "dx m", value: .05 }, { id: "dzM", label: "深度步长 m", value: .02 }, { id: "zMaxM", label: "最大深度 m (可空)", value: "" }]],
+  "split-step": ["2-D Split-step Fourier 分步傅里叶偏移", [{ id: "vofh", label: "层状速度模型: 速度,厚度", value: "0.1,0", type: "textarea" }, { id: "dtNs", label: "dt ns", value: .625 }, { id: "dxM", label: "dx m", value: .05 }, { id: "dzM", label: "深度步长 m", value: .02 }, { id: "zMaxM", label: "最大深度 m (可空)", value: "" }, { id: "fMaxGHz", label: "最高频率 GHz (可空)", value: "" }, { id: "q", label: "Q (可空)", value: "" }, { id: "antennaFreqMHz", label: "天线频率 MHz (可空)", value: "" }]]
 };
 
 function openProcess(op) {
@@ -401,6 +372,34 @@ function openProcess(op) {
     }
   };
   $("#process-dialog").showModal();
+}
+
+function ensureAlgorithmDialog() {
+  let dlg = $("#algorithm-help-dialog");
+  if (dlg) return dlg;
+  dlg = document.createElement("dialog");
+  dlg.id = "algorithm-help-dialog";
+  dlg.className = "wide-dialog algorithm-dialog";
+  dlg.innerHTML = `
+    <form method="dialog">
+      <h2>算法说明</h2>
+      <p class="muted">以下列表不包含基础滤波、去直流、去低频等预处理；每个算法执行后先进入 Output Data。</p>
+      <div id="algorithm-help-list" class="algorithm-help-list"></div>
+      <menu><button value="cancel">关闭</button></menu>
+    </form>`;
+  document.body.appendChild(dlg);
+  return dlg;
+}
+
+function showAlgorithmHelp() {
+  const dlg = ensureAlgorithmDialog();
+  $("#algorithm-help-list").innerHTML = algorithmDocs.map(([name, principle, usage], i) => `
+    <article class="algorithm-card">
+      <h3>${i + 1}. ${escapeHtml(name)}</h3>
+      <p><b>原理：</b>${escapeHtml(principle)}</p>
+      <p><b>用法：</b>${escapeHtml(usage)}</p>
+    </article>`).join("");
+  dlg.showModal();
 }
 
 function ensureFkDialog() {
@@ -604,7 +603,7 @@ function switchPage(name) {
   if (name === "velocity") renderVelocity();
   if (name === "model") renderModel();
   if (name === "three") renderThree();
-  if (name === "interpret") {
+  if (name === "interpret" || name === "geo-modeling") {
     syncGeoControlsFromDataset();
     drawGeologyResult();
   }
@@ -799,11 +798,14 @@ function clearInteractionState() {
   radarAnnotations = [];
   lastMergedSelection = null;
   geologyResult = null;
+  geologyPipelineState = {};
   radar.setSelections([]);
   radar.setAnnotations([]);
   updateSelectionPanel();
   updateAnnotationPanel();
   if ($("#geo-report")) $("#geo-report").innerHTML = "尚未生成自动地质模型。";
+  if ($("#geo-pipeline-report")) $("#geo-pipeline-report").innerHTML = "手动流水线尚未运行。";
+  updateGeoPipelineButtons();
 }
 function toggleFloat(id) {
   const el = $(`#${id}`);
@@ -821,6 +823,19 @@ function dataFileName(name, ext = ".2b") {
   const clean = String(name || "data").trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\.\w+$/i, "");
   return `${clean || "data"}${ext}`;
 }
+function renderSideDatasetList() {
+  const list = $("#side-dataset-list");
+  if (!list) return;
+  const items = store.managedDatasets || [];
+  list.innerHTML = items.length ? items.map(item => {
+    const current = item.isCurrent ? " current" : "";
+    const format = item.meta?.sourceFormat || item.sourceFormat || "data";
+    return `<button class="side-dataset-item${current}" data-side-use="${item.id}" title="${escapeHtml(item.name)}">
+      <span>${escapeHtml(item.name)}</span>
+      <small>${escapeHtml(format)} · ${item.numTraces}×${item.numSamples}</small>
+    </button>`;
+  }).join("") : "暂无数据";
+}
 function renderDataManager() {
   const body = $("#data-manager-body");
   if (!body) return;
@@ -831,15 +846,15 @@ function renderDataManager() {
   $("#data-manager-count").textContent = `${items.length} 个数据集`;
   $("#data-manager-empty").classList.toggle("hidden", items.length > 0);
   $("#data-manager-selection").textContent = selectedItems.length ? `已选择 ${selectedItems.length} 个数据集，共 ${selectedItems.reduce((sum, item) => sum + item.numTraces, 0)} 道` : "未选择数据";
-  $("#data-merge-export").disabled = selectedItems.length < 2;
+  $("#data-merge-export").disabled = selectedItems.length < 2 || selectedItems.some(item => item.numSamples !== SAMPLES_PER_TRACE);
+  $("#data-delete-selected").disabled = selectedItems.length === 0;
   $("#data-clear-selection").disabled = selectedItems.length === 0;
   body.innerHTML = items.map(item => {
     const can2B = item.numSamples === SAMPLES_PER_TRACE;
     const checked = dataManagerSelection.has(item.id) ? "checked" : "";
-    const disabled = can2B ? "" : "disabled";
     const status = item.managedStatus ? `<span class="data-status">${escapeHtml(item.managedStatus)}</span>` : "";
     return `<tr class="${item.isCurrent ? "current" : ""}">
-      <td><input type="checkbox" data-data-select="${item.id}" ${checked} ${disabled} title="${can2B ? "选择合并导出" : "样点数不是 2048，不能合并导出 .2B"}"></td>
+      <td><input type="checkbox" data-data-select="${item.id}" ${checked} title="${can2B ? "可选择合并导出或删除" : "可删除；样点数不是 2048，不能合并导出 .2B"}"></td>
       <td class="data-name-cell"><div class="data-name-main"><button data-data-use="${item.id}" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</button><span class="data-tag">${escapeHtml(item.managedKind || "数据")}</span>${status}</div></td>
       <td>${item.numTraces}</td>
       <td>${item.numSamples}</td>
@@ -851,6 +866,16 @@ function renderDataManager() {
       </div></td>
     </tr>`;
   }).join("");
+}
+function deleteSelectedManagedDatasets() {
+  const selected = [...dataManagerSelection];
+  if (!selected.length) return toast("请先选择要删除的数据", "warn");
+  const deleted = store.deleteManagedDatasets(selected);
+  dataManagerSelection.clear();
+  clearInteractionState();
+  renderDataManager();
+  if (deleted) toast(`已删除 ${deleted} 个数据集`);
+  else toast("没有删除任何数据", "warn");
 }
 function useManagedDataset(id) {
   if (!store.useManagedDataset(id)) return toast("没有找到该数据集", "warn");
@@ -1048,6 +1073,43 @@ function renderDatasetCanvas(canvas, ds, opts = {}) {
     });
     ctx.setLineDash([]);
   }
+  if (opts.axes) {
+    const depthMax = opts.depthMax || opts.modelDepthMax || displaySamples;
+    const traceMax = Math.max(0, (ds.numTraces || 1) - 1);
+    ctx.save();
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = "rgba(248,252,255,.88)";
+    ctx.fillStyle = "#f8fcff";
+    ctx.shadowColor = "rgba(0,0,0,.95)";
+    ctx.shadowBlur = 5;
+    ctx.font = "11px Consolas";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+    for (let i = 0; i <= 5; i++) {
+      const x = i / 5 * (w - 1);
+      const trace = Math.round(i / 5 * traceMax);
+      const label = Number.isFinite(opts.distanceStep) ? `${(trace * opts.distanceStep).toFixed(1)} m` : String(trace);
+      ctx.beginPath(); ctx.moveTo(x, h - 1); ctx.lineTo(x, h - 9); ctx.stroke();
+      ctx.fillText(label, x, h - 21);
+    }
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i <= 5; i++) {
+      const y = i / 5 * (h - 1);
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(9, y); ctx.stroke();
+      ctx.fillText(`${(i / 5 * depthMax).toFixed(1)} m`, 54, y);
+    }
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(Number.isFinite(opts.distanceStep) ? "Distance (m)" : "Trace", w / 2, h - 2);
+    ctx.save();
+    ctx.translate(15, h / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Depth (m)", 0, 0);
+    ctx.restore();
+    ctx.restore();
+  }
 }
 function drawSelectionPreview() {
   if (!$("#selection-preview")) return;
@@ -1088,28 +1150,7 @@ async function runGeologyModel() {
   const ds = currentDisplayed();
   if (!ds) return toast("请先导入数据", "warn");
   syncGeoControlsFromDataset();
-  const velocity = finiteNumber($("#geo-velocity")?.value, 0.1);
-  const dt = finiteNumber($("#geo-dt")?.value, datasetDtNs(ds));
-  const dx = finiteNumber($("#geo-dx")?.value, datasetDxM(ds));
-  const params = {
-    velocity,
-    dt,
-    dx,
-    loMHz: Number($("#geo-lo")?.value || 20),
-    hiMHz: Number($("#geo-hi")?.value || 900),
-    bgWidth: Number($("#geo-bg")?.value || 25),
-    agcWindow: Number($("#geo-agc")?.value || 80),
-    modelDepthMax: finiteNumber($("#geo-depth")?.value, inferredDepthMax(ds, dt, velocity)),
-    preprocess: {
-      dewow: $("#geo-use-dewow")?.checked !== false,
-      dc: $("#geo-use-dc")?.checked !== false,
-      freqFilter: $("#geo-use-freq")?.checked !== false,
-      backgroundRemove: $("#geo-use-bg")?.checked !== false,
-      slidingBg: $("#geo-use-sliding")?.checked !== false,
-      equalize: $("#geo-use-equalize")?.checked === true,
-      gainMethod: $("#geo-gain-method")?.value || "gagc"
-    }
-  };
+  const params = collectGeoParams(ds);
   $("#footer-status").textContent = "正在自动提取界面并生成地质模型";
   try {
     geologyResult = await runWorker("geology-model", ds, params);
@@ -1133,10 +1174,93 @@ async function runGeologyModel() {
     $("#footer-status").textContent = "自动地质建模失败";
   }
 }
+
+function collectGeoParams(ds = currentDisplayed()) {
+  const velocity = finiteNumber($("#geo-velocity")?.value, 0.1);
+  const dt = finiteNumber($("#geo-dt")?.value, datasetDtNs(ds));
+  const dx = finiteNumber($("#geo-dx")?.value, datasetDxM(ds));
+  return {
+    velocity,
+    dt,
+    dx,
+    loMHz: Number($("#geo-lo")?.value || 20),
+    hiMHz: Number($("#geo-hi")?.value || 900),
+    bgWidth: Number($("#geo-bg")?.value || 25),
+    agcWindow: Number($("#geo-agc")?.value || 80),
+    modelDepthMax: finiteNumber($("#geo-depth")?.value, inferredDepthMax(ds, dt, velocity)),
+    preprocess: {
+      dewow: $("#geo-use-dewow")?.checked !== false,
+      dc: $("#geo-use-dc")?.checked !== false,
+      freqFilter: $("#geo-use-freq")?.checked !== false,
+      backgroundRemove: $("#geo-use-bg")?.checked !== false,
+      slidingBg: $("#geo-use-sliding")?.checked !== false,
+      equalize: $("#geo-use-equalize")?.checked === true,
+      gainMethod: $("#geo-gain-method")?.value || "gagc"
+    }
+  };
+}
+
+async function runGeoPipelineStep(op) {
+  const ds = currentDisplayed();
+  if (!ds) return toast("请先导入数据", "warn");
+  syncGeoControlsFromDataset();
+  const def = geoPipelineDefs.find(x => x[0] === op);
+  const params = collectGeoParams(ds);
+  $("#footer-status").textContent = `正在运行 ${def?.[1] || op}`;
+  try {
+    const result = await runWorker(op, ds, params);
+    geologyPipelineState[op] = result;
+    updateGeoPipelineButtons(op);
+    if (op === "geo-classify-model") geologyResult = {
+      ...result,
+      numTraces: result.numTraces,
+      numSamples: result.numSamples,
+      layerNames: result.layerNames || []
+    };
+    drawGeoPipelineResult(op, result, def);
+    $("#footer-status").textContent = `${def?.[1] || op} 完成`;
+    toast(`${def?.[1] || op} 完成`);
+  } catch (error) {
+    toast(error.message, "err");
+    $("#footer-status").textContent = `${def?.[1] || op} 失败`;
+  }
+}
+
+function drawGeoPipelineResult(op, result, def) {
+  if (!result) return;
+  const preview = { data: result.data, numTraces: result.numTraces, numSamples: result.numSamples };
+  renderDatasetCanvas($("#geo-radar-canvas"), preview, {
+    cmap: "seismic",
+    min: -2.2,
+    max: 2.2,
+    horizons: result.horizons || [],
+    modelDepthMax: result.modelDepthMax || 24,
+    depthMax: result.modelDepthMax || 24,
+    distanceStep: result.distanceStep || result.dx,
+    axes: true,
+    sampleMax: result.depthStep ? Math.ceil((result.modelDepthMax || 24) / result.depthStep) : result.numSamples
+  });
+  if (result.modelData) drawLayerModelCanvas($("#geo-model-canvas"), result);
+  const details = [];
+  if (result.peaks) details.push(`峰值 ${result.peaks.length} 个`);
+  if (result.clusters) details.push(`聚类 ${result.clusters.length} 个`);
+  if (result.mergedClusters) details.push(`合并聚类 ${result.mergedClusters.length} 个`);
+  if (result.seeds) details.push(`候选层位 ${result.seeds.length} 个`);
+  if (result.horizons) details.push(`层位线 ${result.horizons.length} 条`);
+  if (result.modelData) details.push(`模型 ${result.modelTraces} 道 × ${result.modelSamples} 深度格`);
+  $("#geo-pipeline-report").innerHTML = `<b>${def?.[1] || op}</b><p>${def?.[2] || ""}</p><p>${details.join("；") || "已生成预览数据。"}</p><p class="muted">手动运行时会按该步骤自动补齐前置计算；建议仍按编号顺序检查结果。</p>`;
+}
+function updateGeoPipelineButtons(activeOp = "") {
+  $$("[data-geo-step]").forEach(btn => {
+    const op = btn.dataset.geoStep;
+    btn.classList.toggle("completed", !!geologyPipelineState[op]);
+    btn.classList.toggle("active", op === activeOp);
+  });
+}
 function drawGeologyResult() {
   if (!geologyResult) return;
   renderDatasetCanvas($("#geo-radar-canvas"), { data: geologyResult.data, numTraces: geologyResult.numTraces, numSamples: geologyResult.numSamples }, {
-    cmap: "seismic", min: -2.2, max: 2.2, horizons: geologyResult.horizons, modelDepthMax: geologyResult.modelDepthMax, sampleMax: Math.ceil(geologyResult.modelDepthMax / geologyResult.depthStep)
+    cmap: "seismic", min: -2.2, max: 2.2, horizons: geologyResult.horizons, modelDepthMax: geologyResult.modelDepthMax, depthMax: geologyResult.modelDepthMax, distanceStep: geologyResult.distanceStep || geologyResult.dx, axes: true, sampleMax: Math.ceil(geologyResult.modelDepthMax / geologyResult.depthStep)
   });
   drawLayerModelCanvas($("#geo-model-canvas"), geologyResult);
   const rows = geologyResult.horizons.map(h => `<tr><td>${h.name}</td><td>${h.medianDepth.toFixed(2)} m</td><td>${h.minDepth.toFixed(2)}-${h.maxDepth.toFixed(2)} m</td><td>${h.layerName}</td><td>${h.meaning}</td></tr>`).join("");
@@ -1202,6 +1326,37 @@ function drawLayerModelCanvas(canvas, result) {
     }
   }
   ctx.putImageData(img, 0, 0);
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,.9)";
+  ctx.fillStyle = "rgba(255,255,255,.96)";
+  ctx.lineWidth = Math.max(1, dpr);
+  ctx.font = `${Math.max(10, 11 * dpr)}px Consolas`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.strokeRect(0.5 * dpr, 0.5 * dpr, w - dpr, h - dpr);
+  for (let i = 0; i <= 5; i++) {
+    const x = i / 5 * (w - 1);
+    const trace = Math.round(i / 5 * ((result.modelTraces || result.numTraces || 1) - 1));
+    const label = Number.isFinite(result.distanceStep) ? `${(trace * result.distanceStep).toFixed(1)}m` : String(trace);
+    ctx.beginPath(); ctx.moveTo(x, h - 1); ctx.lineTo(x, h - 8 * dpr); ctx.stroke();
+    ctx.fillText(label, x, h - 18 * dpr);
+  }
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= 5; i++) {
+    const y = i / 5 * (h - 1);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(8 * dpr, y); ctx.stroke();
+    ctx.fillText(`${(i / 5 * depthMax).toFixed(1)}m`, 48 * dpr, y);
+  }
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(Number.isFinite(result.distanceStep) ? "Distance (m)" : "Trace", w / 2, h - 2 * dpr);
+  ctx.save();
+  ctx.translate(14 * dpr, h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText("Depth (m)", 0, 0);
+  ctx.restore();
+  ctx.restore();
 }
 function exportGeologyJson() {
   if (!geologyResult) return toast("请先生成自动地质模型", "warn");
@@ -1282,6 +1437,37 @@ function exportGeoImage(format, showLines, title) {
     }
   }
   ctx.putImageData(img, 0, 0);
+  ctx.save();
+  ctx.strokeStyle = "rgba(16,24,40,.9)";
+  ctx.fillStyle = "rgba(16,24,40,.96)";
+  ctx.lineWidth = 3;
+  ctx.font = "28px Consolas";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.strokeRect(2, 2, pw - 4, ph - 4);
+  for (let i = 0; i <= 5; i++) {
+    const x = i / 5 * (pw - 1);
+    const trace = Math.round(i / 5 * ((result.numTraces || result.modelTraces || 1) - 1));
+    const label = Number.isFinite(result.distanceStep) ? `${(trace * result.distanceStep).toFixed(1)} m` : String(trace);
+    ctx.beginPath(); ctx.moveTo(x, ph - 1); ctx.lineTo(x, ph - 26); ctx.stroke();
+    ctx.fillText(label, x, ph - 58);
+  }
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= 5; i++) {
+    const y = i / 5 * (ph - 1);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(26, y); ctx.stroke();
+    ctx.fillText(`${(i / 5 * depthMax).toFixed(1)} m`, 135, y);
+  }
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(Number.isFinite(result.distanceStep) ? "Distance (m)" : "Trace", pw / 2, ph - 8);
+  ctx.save();
+  ctx.translate(40, ph / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText("Depth (m)", 0, 0);
+  ctx.restore();
+  ctx.restore();
   if (format === "pdf") {
     const dataUrl = canvas.toDataURL("image/png");
     const rows = hzns.map(function(h) { return '<tr><td>'+h.name+'</td><td>'+h.medianDepth.toFixed(2)+' m</td><td>'+h.minDepth.toFixed(2)+'-'+h.maxDepth.toFixed(2)+' m</td><td>'+h.layerName+'</td><td>'+h.meaning+'</td></tr>'; }).join("");
@@ -1325,8 +1511,10 @@ function bindUi() {
       renderDataManager();
     }
     if (e.target.dataset.dataUse) useManagedDataset(e.target.dataset.dataUse);
+    if (e.target.dataset.sideUse) useManagedDataset(e.target.dataset.sideUse);
     if (e.target.dataset.dataRename) renameManagedDataset(e.target.dataset.dataRename);
     if (e.target.dataset.dataExport) exportManagedDataset(e.target.dataset.dataExport);
+    if (e.target.dataset.geoStep) runGeoPipelineStep(e.target.dataset.geoStep);
     if (page) switchPage(page);
     if (proc) openProcess(proc);
     if (exp) exportData(exp);
@@ -1346,6 +1534,7 @@ function bindUi() {
     if (action === "selection-export-2b") exportSelection("2b");
     if (action === "selection-export-pdf") exportSelection("pdf");
     if (action === "data-merge-export") mergeSelectedManagedDatasets();
+    if (action === "data-delete-selected") deleteSelectedManagedDatasets();
     if (action === "data-clear-selection") { dataManagerSelection.clear(); renderDataManager(); }
     if (action === "annotation-export") download(new Blob([JSON.stringify(radarAnnotations, null, 2)], { type: "application/json" }), "annotations.json");
     if (action === "annotation-clear") { radarAnnotations = []; updateAnnotationPanel(); }
@@ -1362,6 +1551,7 @@ function bindUi() {
     if (action === "show-instant") openProcess("instantaneous");
     if (action === "show-centroid") computeSpecial("centroid", "质心频率");
     if (action === "show-attenuation") computeAttenuation();
+    if (action === "show-algorithm-help") showAlgorithmHelp();
     if (action === "velocity-calc") simpleVelocityCalc();
     if (action === "velocity-1d") toast("1-D velocity model 已使用速度点表作为第一版模型。", "warn");
     if (action === "velocity-2d") toast("2-D velocity model 可由 Model Builder 生成。", "warn");

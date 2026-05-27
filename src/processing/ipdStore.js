@@ -108,6 +108,41 @@ export class IpdStore extends EventTarget {
     this.emit();
     return true;
   }
+  deleteManagedDatasets(ids = []) {
+    const removeIds = new Set(Array.from(ids).filter(Boolean));
+    if (!removeIds.size) return 0;
+    const before = this.datasets.length;
+    const currentId = this.ipd?.current?.managerId || this.ipd?.current?.id;
+    const outputId = this.output?.managerId || this.output?.id;
+    const deletesCurrent = currentId && removeIds.has(currentId);
+    const deletesOutput = outputId && removeIds.has(outputId);
+    this.datasets = this.datasets.filter(item => !removeIds.has(item.id));
+    this.snapshots = this.snapshots.filter(item => !removeIds.has(item.managerId || item.id));
+    if (deletesOutput || deletesCurrent) {
+      this.output = null;
+      this.pendingStep = null;
+    }
+    if (deletesCurrent) {
+      const next = this.datasets[0];
+      if (next) {
+        const current = cloneDataset({ ...next, id: next.id, managerId: next.id, label: "Current Input Data" });
+        this.ipd = { id: next.id, name: next.name, rawData: cloneDataset(current), current, history: [] };
+        this.snapshots = [cloneDataset(current)];
+        this.setManagedCurrent(next.id);
+      } else {
+        this.ipd = null;
+        this.output = null;
+        this.pendingStep = null;
+        this.snapshots = [];
+      }
+    } else if (this.ipd) {
+      this.setManagedCurrent(currentId);
+      if (!this.snapshots.length) this.snapshots = [cloneDataset(this.ipd.current)];
+    }
+    const deleted = before - this.datasets.length;
+    if (deleted) this.emit();
+    return deleted;
+  }
   useManagedDataset(id) {
     const item = this.getManagedDataset(id);
     if (!item) return false;

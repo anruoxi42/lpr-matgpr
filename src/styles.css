@@ -45,6 +45,11 @@ label input, label select { margin-top:4px; }
 .side { grid-column:2; grid-row:3; overflow:auto; background:var(--bg1); border-left:1px solid var(--bd); padding:12px; }
 .side h3 { margin:8px 0 10px; color:var(--t1); font-size:13px; }
 .state-panel, .history-panel, .list { border:1px solid var(--bd); border-radius:var(--r); background:var(--bg2); padding:10px; color:var(--t2); font-size:12px; }
+.side-dataset-list { display:flex; flex-direction:column; gap:6px; border:1px solid var(--bd); border-radius:var(--r); background:var(--bg2); padding:8px; color:var(--t2); font-size:12px; }
+.side-dataset-item { display:flex; flex-direction:column; gap:2px; align-items:flex-start; width:100%; padding:7px 8px; text-align:left; background:var(--bg1); border:1px solid transparent; }
+.side-dataset-item span, .side-dataset-item small { pointer-events:none; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.side-dataset-item small { color:var(--t2); }
+.side-dataset-item.current { border-color:var(--ac); background:#10203a; }
 .history-item { padding:7px; border-bottom:1px solid var(--bd); }
 .history-item:last-child { border-bottom:0; }
 .footer { grid-column:1/-1; display:flex; justify-content:space-between; align-items:center; padding:0 14px; background:var(--bg2); border-top:1px solid var(--bd); color:var(--t2); font-size:11px; font-family:var(--mono); }
@@ -101,10 +106,15 @@ label input, label select { margin-top:4px; }
 .export-options, .geo-controls { display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:8px; margin:12px 0; }
 .geo-canvas-grid { display:grid; grid-template-columns:1fr; gap:14px; margin:14px 0; }
 .geo-canvas-grid h3 { margin:0 0 6px; font-size:13px; color:var(--t1); }
-.geo-toggles { display:flex; flex-wrap:wrap; gap:6px 14px; margin:10px 0; padding:8px 10px; background:var(--bg2); border-radius:6px; border:1px solid var(--border); }
+.geo-toggles { display:flex; flex-wrap:wrap; gap:6px 14px; margin:10px 0; padding:8px 10px; background:var(--bg2); border-radius:6px; border:1px solid var(--bd); }
 .toggle-label { display:inline-flex; align-items:center; gap:4px; font-size:12px; color:var(--t2); cursor:pointer; white-space:nowrap; }
-.toggle-label input[type="checkbox"] { margin:0; accent-color:var(--accent); }
-.toggle-label select { font-size:11px; padding:2px 4px; background:var(--bg); border:1px solid var(--border); color:var(--t1); border-radius:3px; }
+.toggle-label input[type="checkbox"] { margin:0; accent-color:var(--ac); }
+.toggle-label select { font-size:11px; padding:2px 4px; background:var(--bg0); border:1px solid var(--bd); color:var(--t1); border-radius:3px; }
+.geo-pipeline { margin:12px 0; padding:10px; border:1px solid var(--bd); border-radius:var(--r); background:var(--bg2); }
+.geo-pipeline h3 { margin:0 0 8px; color:var(--t1); font-size:13px; }
+.geo-step-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:7px; margin-bottom:10px; }
+.geo-step-grid button { padding:6px 8px; text-align:left; font-size:12px; }
+.geo-step-grid button.completed { border-color:var(--ok); color:#dffbea; }
 .geo-export-dialog { min-width:360px; }
 .geo-export-dialog label { display:flex; align-items:center; gap:6px; margin:8px 0; }
 .geo-export-dialog .export-option-group { margin:12px 0; }
@@ -127,6 +137,11 @@ dialog menu { display:flex; justify-content:flex-end; gap:8px; padding:0; margin
 .fk-canvas-wrap { min-height:520px; border:1px solid var(--bd); border-radius:var(--r); background:var(--bg0); overflow:hidden; }
 .fk-canvas-wrap canvas { width:100%; height:100%; display:block; }
 .fk-controls { border:1px solid var(--bd); border-radius:var(--r); background:var(--bg2); padding:10px; overflow:auto; }
+.algorithm-dialog { width:min(980px, calc(100vw - 32px)); }
+.algorithm-help-list { max-height:65vh; overflow:auto; display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:10px; }
+.algorithm-card { border:1px solid var(--bd); border-radius:var(--r); background:var(--bg2); padding:10px; }
+.algorithm-card h3 { margin:0 0 6px; color:var(--t0); font-size:14px; }
+.algorithm-card p { margin:6px 0; color:var(--t1); }
 #toast { position:fixed; right:18px; top:120px; z-index:200; display:flex; flex-direction:column; gap:8px; }
 .toast { padding:10px 13px; border-radius:7px; background:var(--ac); color:white; box-shadow:0 8px 30px #0008; max-width:420px; }
 .toast.ok { background:var(--ok); }

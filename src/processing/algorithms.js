@@ -1637,7 +1637,270 @@ function enforceLineBelowPrevious(line, previous, minGap) {
   return line;
 }
 
+const GEO_LABELS = [
+  "upper regolith / disturbed shallow layer",
+  "layered regolith unit A",
+  "layered regolith unit B",
+  "strong reflector package",
+  "deeper weakly resolved material",
+  "deep noisy tail",
+  "unclassified"
+];
+
+const GEO_MEANINGS = [
+  "Upper disturbed regolith above the first continuous reflector.",
+  "Layered regolith package bounded by shallow continuous reflectors.",
+  "Thin layered transition with a clear dielectric contrast.",
+  "Laterally persistent strong reflection package.",
+  "Weakly resolved material below the tracked reflector package.",
+  "Deep interval with lower continuity and higher uncertainty."
+];
+
+function geoParams(params = {}, ns = 1) {
+  const dt = Number(params.dt ?? params.dtNs) || 0.3125;
+  const dx = Number(params.dx ?? params.dxM) || 0.05;
+  const velocity = Number(params.velocity) || 0.1;
+  const depthStep = velocity * dt / 2;
+  const modelDepthMax = Number(params.modelDepthMax) || 24;
+  const startSample = Math.max(0, Math.floor((Number(params.startDepth) || 1.5) / depthStep));
+  const endSample = Math.min(ns - 2, Math.ceil((Number(params.endDepth) || Math.min(24, (ns - 1) * depthStep)) / depthStep));
+  return {
+    dt,
+    dx,
+    velocity,
+    loMHz: Number(params.loMHz) || 20,
+    hiMHz: Number(params.hiMHz) || 900,
+    bgWidth: Number(params.bgWidth) || 25,
+    agcWindow: Number(params.agcWindow) || 80,
+    modelDepthMax,
+    sampleRate: 1 / (dt * 1e-9),
+    depthStep,
+    startSample,
+    endSample,
+    minSepSamples: Math.max(1, Math.round((Number(params.minHorizonSeparation) || 0.8) / depthStep)),
+    maxPeaksPerTrace: clamp(Math.floor(Number(params.maxPeaksPerTrace) || 4), 1, 10),
+    binSize: Number(params.binSizeM) || 0.5,
+    histPercentile: Number(params.histPercentile) || 0.72,
+    clusterSearchM: Number(params.clusterSearchM) || 0.75,
+    mergeDistanceM: Number(params.mergeDistanceM) || 0.7,
+    supportThreshold: Number(params.supportThreshold) || 0.22,
+    maxHorizons: Number(params.maxHorizons) || 6,
+    trackHalfWindow: Number(params.trackHalfWindow) || 0.85,
+    horizonMinGapM: Number(params.horizonMinGapM) || 0.15,
+    modelSamples: Number(params.modelSamples) || 480
+  };
+}
+
+function geologyPreprocess(d, nt, ns, params = {}) {
+  const gp = geoParams(params, ns);
+  const preprocess = params.preprocess || {};
+  let r = new Float32Array(d);
+  if (preprocess.dewow !== false) r = dewow(r, nt, ns).data;
+  if (preprocess.dc !== false) r = removeDC(r, nt, ns).data;
+  if (preprocess.freqFilter !== false) r = freqFilter(r, nt, ns, "bp", gp.loMHz * 1e6, gp.hiMHz * 1e6, gp.sampleRate).data;
+  if (preprocess.backgroundRemove !== false) r = backgroundRemove(r, nt, ns).data;
+  if (preprocess.slidingBg !== false) r = slidingBackground(r, nt, ns, gp.bgWidth, "remove").data;
+  if (preprocess.equalize === true) r = equalize(r, nt, ns).data;
+  const gainMethod = preprocess.gainMethod || params.gainMethod || "gagc";
+  if (gainMethod === "agc") r = agc(r, nt, ns, gp.agcWindow, false).data;
+  else if (gainMethod === "power") r = powerGain(r, nt, ns, { power: "auto", dtNs: gp.dt }).data;
+  else if (gainMethod === "amplitude") r = amplitudeGain(r, nt, ns, { dtNs: gp.dt }).data;
+  else r = agc(r, nt, ns, gp.agcWindow, true).data;
+  const clip = Number(params.clip) || 4;
+  for (let i = 0; i < r.length; i++) {
+    if (r[i] > clip) r[i] = clip;
+    else if (r[i] < -clip) r[i] = -clip;
+  }
+  return { data: r, gp };
+}
+
+export function geologyEnergyEnvelope(d, nt, ns, params = {}) {
+  const pre = geologyPreprocess(d, nt, ns, params);
+  const energy = new Float32Array(pre.data.length);
+  for (let i = 0; i < pre.data.length; i++) energy[i] = Math.abs(pre.data[i]);
+  return { data: energy, processedData: pre.data, numTraces: nt, numSamples: ns, ...pre.gp, step: "energy-envelope" };
+}
+
+export function geologySmooth2D(d, nt, ns, params = {}) {
+  const energy = geologyEnergyEnvelope(d, nt, ns, params);
+  const sampleWidth = Number(params.energySampleSmooth) || 17;
+  const traceWidth = Number(params.energyTraceSmooth) || 13;
+  const smoothed = smoothTraces(smoothSamples(energy.data, nt, ns, sampleWidth), nt, ns, traceWidth);
+  return { ...energy, data: smoothed, energyData: energy.data, step: "smooth-2d", sampleWidth, traceWidth };
+}
+
+export function geologyTracePeaks(d, nt, ns, params = {}) {
+  const smooth = geologySmooth2D(d, nt, ns, params);
+  const peaks = [];
+  for (let t = 0; t < nt; t++) {
+    const candidates = [];
+    for (let s = smooth.startSample + 1; s < smooth.endSample - 1; s++) {
+      const v = smooth.data[t * ns + s];
+      if (v > smooth.data[t * ns + s - 1] && v >= smooth.data[t * ns + s + 1]) candidates.push({ s, v });
+    }
+    candidates.sort((a, b) => b.v - a.v);
+    const chosen = [];
+    for (const c of candidates) {
+      if (chosen.every(p => Math.abs(p.s - c.s) >= smooth.minSepSamples)) chosen.push(c);
+      if (chosen.length >= smooth.maxPeaksPerTrace) break;
+    }
+    for (const c of chosen) peaks.push({ t, sample: c.s, depth: c.s * smooth.depthStep, strength: c.v });
+  }
+  return { ...smooth, peaks, step: "trace-peaks" };
+}
+
+export function geologyDepthHistogram(d, nt, ns, params = {}) {
+  const peakResult = geologyTracePeaks(d, nt, ns, params);
+  const binStart = peakResult.startSample * peakResult.depthStep;
+  const binEnd = peakResult.endSample * peakResult.depthStep;
+  const binCount = Math.max(1, Math.ceil((binEnd - binStart) / peakResult.binSize));
+  const hist = new Float32Array(binCount);
+  for (const p of peakResult.peaks) {
+    const bi = Math.floor((p.depth - binStart) / peakResult.binSize);
+    if (bi >= 0 && bi < binCount) hist[bi] += p.strength;
+  }
+  return { ...peakResult, histogram: hist, binStart, binEnd, binCount, step: "depth-histogram" };
+}
+
+export function geologyClusterPeaks(d, nt, ns, params = {}) {
+  const histResult = geologyDepthHistogram(d, nt, ns, params);
+  const histThreshold = percentile(histResult.histogram, histResult.histPercentile);
+  const clusters = [];
+  for (let i = 1; i < histResult.binCount - 1; i++) {
+    if (!(histResult.histogram[i] >= histResult.histogram[i - 1] && histResult.histogram[i] > histResult.histogram[i + 1] && histResult.histogram[i] > histThreshold)) continue;
+    const d0 = histResult.binStart + i * histResult.binSize, d1 = d0 + histResult.binSize;
+    let sumDepth = 0, sumWeight = 0, support = 0, strength = 0;
+    for (const p of histResult.peaks) {
+      if (p.depth >= d0 - histResult.clusterSearchM && p.depth <= d1 + histResult.clusterSearchM) {
+        sumDepth += p.depth * p.strength;
+        sumWeight += p.strength;
+        strength += p.strength;
+        support++;
+      }
+    }
+    if (support) clusters.push({ depth: sumDepth / Math.max(sumWeight, 1e-9), support, strength: strength / support });
+  }
+  return { ...histResult, clusters, histThreshold, step: "cluster-peaks" };
+}
+
+export function geologyMergeClusters(d, nt, ns, params = {}) {
+  const clusterResult = geologyClusterPeaks(d, nt, ns, params);
+  const merged = [];
+  for (const c of clusterResult.clusters.sort((a, b) => a.depth - b.depth)) {
+    const last = merged[merged.length - 1];
+    if (last && Math.abs(c.depth - last.depth) < clusterResult.mergeDistanceM) {
+      const total = last.support + c.support;
+      last.depth = (last.depth * last.support + c.depth * c.support) / total;
+      last.support = total;
+      last.strength = Math.max(last.strength, c.strength);
+    } else merged.push({ ...c });
+  }
+  return { ...clusterResult, mergedClusters: merged, step: "merge-clusters" };
+}
+
+export function geologySelectSupported(d, nt, ns, params = {}) {
+  const mergedResult = geologyMergeClusters(d, nt, ns, params);
+  let seeds = mergedResult.mergedClusters.filter(c => c.support > nt * mergedResult.supportThreshold);
+  if (seeds.length < 4) seeds = mergedResult.mergedClusters.slice().sort((a, b) => b.support - a.support).slice(0, 6);
+  seeds = seeds.sort((a, b) => a.depth - b.depth).slice(0, mergedResult.maxHorizons);
+  return { ...mergedResult, seeds, step: "support-select" };
+}
+
+export function geologyTrackHorizons(d, nt, ns, params = {}) {
+  const seedResult = geologySelectSupported(d, nt, ns, params);
+  const horizons = [];
+  const horizonMinGapSamples = Math.max(1, Math.round(seedResult.horizonMinGapM / seedResult.depthStep));
+  for (let i = 0; i < seedResult.seeds.length; i++) {
+    const center = seedResult.seeds[i].depth;
+    const s0 = Math.max(seedResult.startSample, Math.floor((center - seedResult.trackHalfWindow) / seedResult.depthStep));
+    const s1 = Math.min(seedResult.endSample, Math.ceil((center + seedResult.trackHalfWindow) / seedResult.depthStep));
+    if (s1 <= s0 + 2) continue;
+    const line = new Float32Array(nt);
+    let strength = 0;
+    for (let t = 0; t < nt; t++) {
+      let lowS = s0;
+      const previousHorizon = horizons[horizons.length - 1];
+      if (previousHorizon) lowS = Math.max(lowS, Math.round(previousHorizon.line[t] / seedResult.depthStep) + horizonMinGapSamples);
+      let highS = s1;
+      if (lowS >= highS) lowS = Math.max(s0, highS - 2);
+      let bestS = lowS, bestV = -Infinity;
+      for (let s = lowS; s <= highS; s++) {
+        const v = seedResult.data[t * ns + s];
+        if (v > bestV) { bestV = v; bestS = s; }
+      }
+      line[t] = bestS * seedResult.depthStep;
+      strength += bestV;
+    }
+    const stats = lineDepthStats(line);
+    horizons.push({
+      name: `H${horizons.length + 1}`,
+      meanDepth: stats.meanDepth,
+      medianDepth: stats.medianDepth,
+      minDepth: stats.minDepth,
+      maxDepth: stats.maxDepth,
+      support: seedResult.seeds[i].support,
+      meanStrength: strength / nt,
+      layerName: GEO_LABELS[Math.min(horizons.length, GEO_LABELS.length - 1)],
+      meaning: GEO_MEANINGS[Math.min(horizons.length, GEO_MEANINGS.length - 1)],
+      line
+    });
+  }
+  return { ...seedResult, horizons, horizonMinGapSamples, step: "track-horizons" };
+}
+
+export function geologySmoothHorizonLines(d, nt, ns, params = {}) {
+  const tracked = geologyTrackHorizons(d, nt, ns, params);
+  const horizons = tracked.horizons.map((h, i) => {
+    const line = smoothLine(h.line, Number(params.lineSmoothWidth) || 61);
+    const stats = lineDepthStats(line);
+    return { ...h, name: `H${i + 1}`, ...stats, line };
+  });
+  return { ...tracked, horizons, step: "line-smooth" };
+}
+
+export function geologyEnforceStratigraphy(d, nt, ns, params = {}) {
+  const smoothed = geologySmoothHorizonLines(d, nt, ns, params);
+  const horizonMinGapSamples = Math.max(1, Math.round(smoothed.horizonMinGapM / smoothed.depthStep));
+  const horizonMinGapDepth = horizonMinGapSamples * smoothed.depthStep;
+  const horizons = [];
+  for (let i = 0; i < smoothed.horizons.length; i++) {
+    const h = smoothed.horizons[i];
+    const line = new Float32Array(h.line);
+    enforceLineBelowPrevious(line, horizons[i - 1]?.line, horizonMinGapDepth);
+    const stats = lineDepthStats(line);
+    horizons.push({ ...h, name: `H${i + 1}`, ...stats, line });
+  }
+  return { ...smoothed, horizons, horizonMinGapDepth, step: "stratigraphy" };
+}
+
+export function geologyClassifyModel(d, nt, ns, params = {}) {
+  const strat = geologyEnforceStratigraphy(d, nt, ns, params);
+  const modelData = new Uint8Array(strat.modelSamples * nt);
+  const zStep = strat.modelDepthMax / Math.max(1, strat.modelSamples - 1);
+  for (let z = 0; z < strat.modelSamples; z++) {
+    const depth = z * zStep;
+    for (let t = 0; t < nt; t++) {
+      let layer = 0;
+      for (const h of strat.horizons) if (depth >= h.line[t]) layer++;
+      modelData[z * nt + t] = Math.min(layer, GEO_LABELS.length - 1);
+    }
+  }
+  return {
+    ...strat,
+    data: strat.processedData || strat.data,
+    modelInputData: strat.data,
+    modelData,
+    modelTraces: nt,
+    modelSamples: strat.modelSamples,
+    distanceStep: strat.dx,
+    epsilonR: (0.299792458 / strat.velocity) ** 2,
+    layerNames: GEO_LABELS,
+    step: "classify-model"
+  };
+}
+
 export function geologicModel(d, nt, ns, params = {}) {
+  return geologyClassifyModel(d, nt, ns, params);
   const dt = Number(params.dt) || 0.3125;
   const dx = Number(params.dx) || 0.05;
   const velocity = Number(params.velocity) || 0.1;

@@ -86,6 +86,17 @@ self.onmessage = ({ data }) => {
     else if (op === "notch-filter") r = A.notchFilter(d, nt, ns, { ...params, dtNs: axes.dtNs });
     else if (op === "predc") r = A.predictiveDecon(d, nt, ns, { ...params, dtNs: axes.dtNs });
     else if (op === "static-correction") r = A.staticCorrection(d, nt, ns, { ...params, dtNs: axes.dtNs });
+    else if (op === "geo-energy-envelope") r = A.geologyEnergyEnvelope(d, nt, ns, params);
+    else if (op === "geo-smooth-2d") r = A.geologySmooth2D(d, nt, ns, params);
+    else if (op === "geo-trace-peaks") r = A.geologyTracePeaks(d, nt, ns, params);
+    else if (op === "geo-depth-histogram") r = A.geologyDepthHistogram(d, nt, ns, params);
+    else if (op === "geo-cluster-peaks") r = A.geologyClusterPeaks(d, nt, ns, params);
+    else if (op === "geo-merge-clusters") r = A.geologyMergeClusters(d, nt, ns, params);
+    else if (op === "geo-support-select") r = A.geologySelectSupported(d, nt, ns, params);
+    else if (op === "geo-track-horizons") r = A.geologyTrackHorizons(d, nt, ns, params);
+    else if (op === "geo-line-smooth") r = A.geologySmoothHorizonLines(d, nt, ns, params);
+    else if (op === "geo-stratigraphy") r = A.geologyEnforceStratigraphy(d, nt, ns, params);
+    else if (op === "geo-classify-model") r = A.geologyClassifyModel(d, nt, ns, params);
     else if (op === "geology-model") r = A.geologicModel(d, nt, ns, params);
     else throw new Error("Unknown op: " + op);
     r = withUpdatedMeta(r, dataset, params);

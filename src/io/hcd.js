@@ -1,4 +1,6 @@
 export const HCD_SOURCE_FORMAT = ".HCD";
+export const HCD_DEFAULT_DT_NS = 0.3125;
+export const HCD_DEFAULT_AMP = { min: -100, max: 100 };
 
 function buildAxis(count, step, offset = 0) {
   const axis = new Float32Array(count);
@@ -40,6 +42,7 @@ export function parseHadText(text = "") {
   const timeWindowNs = numeric(fields.TIMEWINDOW);
   const traceIncrementM = numeric(fields["TRACE INCREMENT"]);
   const userDistanceIntervalM = numeric(fields["USER DISTANCE INTERVAL"]);
+  const srDistanceM = firstFinite(numeric(fields["S/R DISTANCE"]), numeric(fields["S/R DISTANC"]));
   return {
     fields,
     dataBit,
@@ -47,10 +50,10 @@ export function parseHadText(text = "") {
     traces,
     frequencyMHz,
     timeWindowNs,
-    dxM: firstFinite(traceIncrementM, userDistanceIntervalM),
+    dxM: firstFinite(traceIncrementM, userDistanceIntervalM, 1),
     traceIncrementM,
     userDistanceIntervalM,
-    srDistanceM: numeric(fields["S/R DISTANC"]),
+    srDistanceM,
     soilVelocityRaw: numeric(fields["SOIL VELOCITY"]),
     antenna: fields.ANTENNA || "",
     antennaFreqMHz: numeric(fields.ANTENNA),
@@ -58,71 +61,38 @@ export function parseHadText(text = "") {
   };
 }
 
-function normalizeHcdParams(input = {}) {
-  const params = typeof input === "string" ? parseHadText(input) : input;
-  const fields = params.fields || params.hadFields || {};
-  const dataBit = requirePositive(Number(params.dataBit ?? params.bit ?? params.bits ?? numeric(fields["DATA BIT"])), "DATA BIT");
-  const samples = requirePositive(Number(params.samples ?? params.numSamples ?? numeric(fields.SAMPLES)), "SAMPLES");
-  const traces = requirePositive(Number(params.traces ?? params.numTraces ?? numeric(fields["TRACE NUMBER"])), "TRACE NUMBER");
-  const timeWindowNs = firstFinite(
-    Number(params.timeWindowNs ?? params.timewindowNs ?? params.timeWindow ?? params.timewindow),
-    numeric(fields.TIMEWINDOW)
-  );
-  const frequencyMHz = firstFinite(
-    Number(params.frequencyMHz ?? params.frequency ?? params.sampleFrequencyMHz),
-    numeric(fields.FREQUENCY)
-  );
-  const dxM = firstFinite(
-    Number(params.dxM ?? params.traceIncrementM ?? params.traceIncrement),
-    numeric(fields["TRACE INCREMENT"]),
-    Number(params.userDistanceIntervalM ?? params.userDistanceInterval),
-    numeric(fields["USER DISTANCE INTERVAL"]),
-    1
-  );
-  const dtNs = firstFinite(
-    Number(params.dtNs ?? params.dt),
-    Number.isFinite(timeWindowNs) && timeWindowNs > 0 ? timeWindowNs / samples : NaN,
-    Number.isFinite(frequencyMHz) && frequencyMHz > 0 ? 1000 / frequencyMHz : NaN
-  );
-  const sampleRateHz = firstFinite(
-    Number(params.sampleRateHz),
-    Number.isFinite(frequencyMHz) && frequencyMHz > 0 ? frequencyMHz * 1e6 : NaN,
-    Number.isFinite(dtNs) && dtNs > 0 ? 1 / (dtNs * 1e-9) : NaN
-  );
+function normalizeHad(had) {
+  const params = typeof had === "string" ? parseHadText(had) : had;
+  if (!params || !params.fields) throw new Error("HCD import requires a matching .had header file");
+  const dataBit = requirePositive(Number(params.dataBit), "DATA BIT");
+  const samples = requirePositive(Number(params.samples), "SAMPLES");
+  const traces = requirePositive(Number(params.traces), "TRACE NUMBER");
+  if (![16, 32].includes(dataBit)) throw new Error(`HCD DATA BIT must be 16 or 32, got ${dataBit}`);
   return {
-    fields,
+    ...params,
     dataBit,
     samples,
     traces,
-    timeWindowNs,
-    frequencyMHz,
-    dxM,
-    dtNs: requirePositive(dtNs, "dtNs"),
-    sampleRateHz,
-    littleEndian: params.littleEndian !== false,
-    srDistanceM: firstFinite(Number(params.srDistanceM), numeric(fields["S/R DISTANC"])),
-    soilVelocityRaw: firstFinite(Number(params.soilVelocityRaw), numeric(fields["SOIL VELOCITY"])),
-    antenna: params.antenna || fields.ANTENNA || "",
-    antennaFreqMHz: firstFinite(Number(params.antennaFreqMHz), numeric(params.antenna || fields.ANTENNA)),
-    mode: params.mode || fields.MODE || ""
+    dxM: firstFinite(Number(params.dxM), Number(params.traceIncrementM), Number(params.userDistanceIntervalM), 1),
+    dtNs: HCD_DEFAULT_DT_NS,
+    sampleRateHz: 1 / (HCD_DEFAULT_DT_NS * 1e-9)
   };
 }
 
-export function parseHcdFile(arrayBuffer, hadOrParams = {}) {
-  const params = normalizeHcdParams(hadOrParams);
-  if (![16, 32].includes(params.dataBit)) throw new Error(`HCD DATA BIT must be 16 or 32, got ${params.dataBit}`);
+export function parseHcdFile(arrayBuffer, had) {
+  const params = normalizeHad(had);
   const bytesPerSample = params.dataBit / 8;
   const expectedBytes = params.traces * params.samples * bytesPerSample;
-  if (arrayBuffer.byteLength !== expectedBytes) {
-    throw new Error(`HCD size mismatch: expected ${expectedBytes} bytes from HAD, got ${arrayBuffer.byteLength}`);
+  if (arrayBuffer.byteLength < expectedBytes) {
+    throw new Error(`HCD size mismatch: expected at least ${expectedBytes} bytes from HAD, got ${arrayBuffer.byteLength}`);
   }
   const view = new DataView(arrayBuffer);
-  const total = params.traces * params.samples;
-  const data = new Float32Array(total);
-  if (params.dataBit === 16) {
-    for (let i = 0, off = 0; i < total; i++, off += 2) data[i] = view.getInt16(off, params.littleEndian);
-  } else {
-    for (let i = 0, off = 0; i < total; i++, off += 4) data[i] = view.getInt32(off, params.littleEndian);
+  const data = new Float32Array(params.traces * params.samples);
+  for (let t = 0; t < params.traces; t++) {
+    for (let s = 0; s < params.samples; s++) {
+      const off = (t * params.samples + s) * bytesPerSample;
+      data[t * params.samples + s] = params.dataBit === 16 ? view.getInt16(off, true) : view.getInt32(off, true);
+    }
   }
   const timeAxisNs = buildAxis(params.samples, params.dtNs);
   const distanceAxisM = buildAxis(params.traces, params.dxM);
@@ -144,7 +114,11 @@ export function parseHcdFile(arrayBuffer, hadOrParams = {}) {
     srDistanceM: params.srDistanceM,
     soilVelocityRaw: params.soilVelocityRaw,
     mode: params.mode,
-    littleEndian: params.littleEndian
+    littleEndian: true,
+    dataLayout: "MATLAB fread -> reshape(rawData, samples, traceNumber)",
+    extraBytes: Math.max(0, arrayBuffer.byteLength - expectedBytes),
+    displayAmpMin: HCD_DEFAULT_AMP.min,
+    displayAmpMax: HCD_DEFAULT_AMP.max
   };
   return { data, meta, numTraces: params.traces, numSamples: params.samples };
 }

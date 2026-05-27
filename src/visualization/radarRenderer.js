@@ -256,8 +256,14 @@ export class RadarRenderer {
   }
   drawAxes(p) {
     const ctx = this.ctx;
-    ctx.strokeStyle = "#28364a"; ctx.strokeRect(p.x, p.y, p.w, p.h);
-    ctx.fillStyle = "#7890aa"; ctx.font = "10px Consolas"; ctx.textAlign = "center";
+    ctx.save();
+    ctx.strokeStyle = "rgba(236,248,255,.82)";
+    ctx.strokeRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = "#f8fcff";
+    ctx.shadowColor = "rgba(0,0,0,.95)";
+    ctx.shadowBlur = 5;
+    ctx.font = "11px Consolas";
+    ctx.textAlign = "center";
     for (let i = 0; i <= 6; i++) {
       const f = i / 6, x = p.x + f * p.w, t = Math.round(this.view.t0 + f * (this.view.t1 - this.view.t0));
       ctx.fillText(t, x, p.y + p.h + 16);
@@ -270,6 +276,7 @@ export class RadarRenderer {
     }
     ctx.textAlign = "center"; ctx.fillText("道号", p.x + p.w / 2, p.y + p.h + 31);
     ctx.save(); ctx.translate(15, p.y + p.h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(this.verticalAxisMode === "depth" ? "深度 (m)" : "采样点 / 时间", 0, 0); ctx.restore();
+    ctx.restore();
   }
   drawTraceLine(p) {
     if (!this.markerLine || !this.dataset) return;
@@ -356,8 +363,8 @@ export class RadarRenderer {
       const [r, g, b] = fn(1 - i / h);
       ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fillRect(x, y + i, 12, 1);
     }
-    ctx.strokeStyle = "#28364a"; ctx.strokeRect(x, y, 12, h);
-    ctx.fillStyle = "#7890aa"; ctx.font = "9px Consolas"; ctx.textAlign = "left";
+    ctx.strokeStyle = "rgba(236,248,255,.82)"; ctx.strokeRect(x, y, 12, h);
+    ctx.fillStyle = "#f8fcff"; ctx.shadowColor = "rgba(0,0,0,.95)"; ctx.shadowBlur = 4; ctx.font = "9px Consolas"; ctx.textAlign = "left";
     ctx.fillText(this.ampMax.toFixed(1), x + 16, y + 8);
     ctx.fillText(this.ampMin.toFixed(1), x + 16, y + h);
   }

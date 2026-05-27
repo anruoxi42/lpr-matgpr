@@ -21,7 +21,7 @@ import {
   geologicModel,
   timeDepth
 } from "../src/processing/algorithms.js";
-import { parseHadText, parseHcdFile } from "../src/io/hcd.js";
+import { HCD_DEFAULT_DT_NS, parseHadText, parseHcdFile } from "../src/io/hcd.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -239,19 +239,20 @@ if (existsSync(chDir)) {
   const hcd16 = parseHcdFile(arrayBufferFromNodeBuffer(readFileSync(join(chDir, "900_0.hcd"))), hcd16Had);
   finite(hcd16.data, "HCD 16-bit import");
   assert(hcd16.numSamples === 1024 && hcd16.numTraces === 6395, "900_0 HCD dimensions are wrong");
-  assert(Math.abs(hcd16.meta.dtNs - 100 / 1024) < 1e-9, "900_0 HCD dtNs is wrong");
+  assert(Math.abs(hcd16.meta.dtNs - HCD_DEFAULT_DT_NS) < 1e-9, "900_0 HCD dtNs is wrong");
   assert(hcd16.meta.sourceFormat === ".HCD" && hcd16.meta.dataBit === 16, "900_0 HCD metadata is wrong");
 
-  const hcd16Manual = parseHcdFile(arrayBufferFromNodeBuffer(readFileSync(join(chDir, "900_0.hcd"))), {
-    dataBit: 16,
-    samples: 1024,
-    traces: 6395,
-    timeWindowNs: 100,
-    frequencyMHz: 10240,
-    dxM: 0.01
-  });
-  assert(hcd16Manual.numSamples === hcd16.numSamples && hcd16Manual.numTraces === hcd16.numTraces, "manual HCD parameters produced wrong dimensions");
-  assert(hcd16Manual.data[0] === hcd16.data[0], "manual HCD parameters did not reproduce sample data");
+  let manualRejected = false;
+  try {
+    parseHcdFile(arrayBufferFromNodeBuffer(readFileSync(join(chDir, "900_0.hcd"))), {
+      dataBit: 16,
+      samples: 1024,
+      traces: 6395
+    });
+  } catch {
+    manualRejected = true;
+  }
+  assert(manualRejected, "manual HCD fallback should be disabled");
 
   const hcd32Had = parseHadText(readFileSync(join(chDir, "1050-9-7-111_1.had"), "utf8"));
   const hcd32 = parseHcdFile(arrayBufferFromNodeBuffer(readFileSync(join(chDir, "1050-9-7-111_1.hcd"))), hcd32Had);

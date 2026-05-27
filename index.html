@@ -23,12 +23,12 @@
         <div class="menu">
           <button data-action="open-import">数据导入</button>
           <button data-page="data-manager">数据管理</button>
-          <button data-action="hold-output">Hold Processed Data</button>
-          <button data-action="discard-output">Discard Processed Data</button>
-          <button data-action="open-undo">Undo / Restore</button>
-          <button data-action="save-mgp">Save to MGP/MAT</button>
-          <button data-action="save-depth">Save Depth Migrated Data</button>
-          <button data-page="export">Export</button>
+          <button data-action="hold-output">Hold Processed Data 保留处理数据</button>
+          <button data-action="discard-output">Discard Processed Data 丢弃处理数据</button>
+          <button data-action="open-undo">Undo / Restore 撤销/恢复</button>
+          <button data-action="save-mgp">Save to MGP/MAT 保存 MGP/MAT</button>
+          <button data-action="save-depth">Save Depth Migrated Data 保存深度偏移数据</button>
+          <button data-page="export">Export 导出</button>
         </div>
       </div>
       <div class="nav-group">
@@ -39,7 +39,7 @@
           <button data-process="bad-traces">不良道插值替换</button>
           <button data-process="remove-dc">去均值 Remove DC</button>
           <button data-process="dewow">去低频 Dewow</button>
-          <button data-process="dzt-gain">Remove DZT header gain</button>
+          <button data-process="dzt-gain">Remove DZT header gain 去除 DZT 头增益</button>
           <button data-process="equalize">均衡轨迹</button>
           <button data-process="resample-time">重采样时间轴</button>
           <button data-process="resample-scan">重采样扫描轴</button>
@@ -49,25 +49,25 @@
       <div class="nav-group">
         <button>增益处理</button>
         <div class="menu">
-          <button data-process="agc">Standard AGC</button>
-          <button data-process="gagc">Gaussian-tapered AGC</button>
-          <button data-process="power-gain">Inverse Power Decay</button>
-          <button data-process="amplitude-gain">Inverse Amplitude Decay</button>
+          <button data-process="agc">Standard AGC 标准 AGC</button>
+          <button data-process="gagc">Gaussian-tapered AGC 高斯窗 AGC</button>
+          <button data-process="power-gain">Inverse Power Decay 反幂衰减增益</button>
+          <button data-process="amplitude-gain">Inverse Amplitude Decay 反振幅衰减增益</button>
         </div>
       </div>
       <div class="nav-group">
         <button>滤波</button>
         <div class="menu">
-          <button data-process="global-bg">Remove Global Background</button>
-          <button data-process="horizontal">Suppress Horizontal Features</button>
-          <button data-process="dipping">Suppress Dipping Features</button>
-          <button data-process="fir-frequency">FIR Frequency Filter</button>
-          <button data-process="fir-wavenumber">FIR Wavenumber Filter</button>
-          <button data-process="fk-filter">F-K Filter</button>
-          <button data-process="kl-filter">Karhunen-Loeve Filter</button>
-          <button data-process="fx-decon">F-X Deconvolution</button>
-          <button data-process="sparse-decon">Sparse Deconvolution</button>
-          <button data-process="advanced-placeholder">Curvelet / Wavelet / Tau-P / F-X</button>
+          <button data-process="global-bg">Remove Global Background 去全局背景</button>
+          <button data-process="horizontal">Suppress Horizontal Features 压制水平同相轴</button>
+          <button data-process="dipping">Suppress Dipping Features 压制倾斜同相轴</button>
+          <button data-process="fir-frequency">FIR Frequency Filter FIR 频率滤波</button>
+          <button data-process="fir-wavenumber">FIR Wavenumber Filter FIR 波数滤波</button>
+          <button data-process="fk-filter">F-K Filter 频率-波数滤波</button>
+          <button data-process="kl-filter">Karhunen-Loeve Filter K-L 主成分滤波</button>
+          <button data-process="fx-decon">F-X Deconvolution F-X 反褶积</button>
+          <button data-process="sparse-decon">Sparse Deconvolution 稀疏反褶积</button>
+          <button data-process="advanced-placeholder">Curvelet / Wavelet / Tau-P / F-X 曲波/小波/τ-p/F-X</button>
         </div>
       </div>
       <div class="nav-group">
@@ -79,41 +79,43 @@
           <button data-action="show-instant">瞬时属性</button>
           <button data-action="show-centroid">质心频率</button>
           <button data-action="show-attenuation">衰减特征</button>
+          <button data-action="show-algorithm-help">算法说明</button>
         </div>
       </div>
       <div class="nav-group">
         <button>速度分析</button>
         <div class="menu">
-          <button data-page="velocity">Fit Diffraction Hyperbola</button>
-          <button data-action="velocity-calc">Simple Velocity Calculator</button>
-          <button data-action="velocity-1d">1-D velocity model</button>
-          <button data-action="velocity-2d">2-D velocity model</button>
+          <button data-page="velocity">Fit Diffraction Hyperbola 拟合绕射双曲线</button>
+          <button data-action="velocity-calc">Simple Velocity Calculator 简易速度计算</button>
+          <button data-action="velocity-1d">1-D velocity model 一维速度模型</button>
+          <button data-action="velocity-2d">2-D velocity model 二维速度模型</button>
         </div>
       </div>
       <div class="nav-group">
-        <button>Imaging</button>
+        <button>Imaging 成像</button>
         <div class="menu">
-          <button data-process="stolt">1-D F-K / Stolt Migration</button>
-          <button data-process="gazdag">1-D Phase-shift / Gazdag</button>
-          <button data-process="time-depth">Time-to-Depth Conversion</button>
-          <button data-process="pspi">2-D PSPI Migration</button>
-          <button data-process="split-step">2-D Split-step Fourier</button>
+          <button data-process="stolt">1-D F-K / Stolt Migration Stolt 偏移</button>
+          <button data-process="gazdag">1-D Phase-shift / Gazdag 相移偏移</button>
+          <button data-process="time-depth">Time-to-Depth Conversion 时深转换</button>
+          <button data-process="pspi">2-D PSPI Migration PSPI 偏移</button>
+          <button data-process="split-step">2-D Split-step Fourier 分步傅里叶偏移</button>
         </div>
       </div>
       <div class="nav-group">
         <button>建模与解释</button>
         <div class="menu">
-          <button data-page="interpret">地质解释</button>
-          <button data-page="model">Build 2-D Model</button>
+          <button data-page="geo-modeling">Geologic Modeling 地质建模</button>
+          <button data-page="interpret">Geologic Interpretation 地质解释</button>
+          <button data-page="model">Build 2-D Model 构建二维模型</button>
           <button data-action="forward">正演模拟</button>
         </div>
       </div>
       <div class="nav-group">
-        <button>3-D Utilities</button>
+        <button>3-D Utilities 三维工具</button>
         <div class="menu">
-          <button data-action="make-xyz">Make XYZ</button>
-          <button data-action="create-3d">Create 3-D Data</button>
-          <button data-page="three">GPR-Slice / 3-D Slices / Isosurface</button>
+          <button data-action="make-xyz">Make XYZ 生成 XYZ</button>
+          <button data-action="create-3d">Create 3-D Data 创建三维数据</button>
+          <button data-page="three">GPR-Slice / 3-D Slices / Isosurface 三维切片/等值面</button>
         </div>
       </div>
     </nav>
@@ -122,9 +124,9 @@
       <section id="page-radar" class="page active">
         <div class="toolbar">
           <input id="file-input" type="file" accept=".2b,.2B,.hcd,.HCD,.had,.HAD" multiple hidden>
-          <button data-action="zoom-in" title="放大">Zoom +</button>
-          <button data-action="zoom-out" title="缩小">Zoom -</button>
-          <button data-action="zoom-fit" title="全图">Fit</button>
+          <button data-action="zoom-in" title="放大">Zoom + 放大</button>
+          <button data-action="zoom-out" title="缩小">Zoom - 缩小</button>
+          <button data-action="zoom-fit" title="全图">Fit 全图</button>
           <span class="sep"></span>
           <button class="radar-tool" data-radar-mode="measure">测量</button>
           <button class="radar-tool" data-radar-mode="select">选区</button>
@@ -142,13 +144,13 @@
           <button class="primary" data-action="open-import">导入数据</button>
           <button data-action="open-trace">道查看器</button>
           <button data-action="open-spectrum">频谱查看器</button>
-          <button data-action="hold-output">Hold</button>
-          <button data-action="discard-output">Discard</button>
-          <button data-action="open-undo">Undo</button>
+          <button data-action="hold-output">Hold 保留</button>
+          <button data-action="discard-output">Discard 丢弃</button>
+          <button data-action="open-undo">Undo 撤销</button>
           <label>显示
             <select id="display-mode">
-              <option value="current">Current Input Data</option>
-              <option value="output">Output Data</option>
+              <option value="current">Current Input Data 当前输入</option>
+              <option value="output">Output Data 输出数据</option>
             </select>
           </label>
           <label>色标
@@ -164,7 +166,7 @@
         </div>
         <div id="drop-zone" class="drop-zone">
           <strong>拖拽 .2B 或 .hcd/.had 文件到此处，或点击“导入数据”</strong>
-          <span>支持 CE-3 .2B；HCD 请同时选择同名 .hcd 与 .had，缺 .had 时可手动填写参数</span>
+          <span>支持 CE-3 .2B；HCD 按 MATLAB P1_read.m 方式导入，请同时选择同名 .hcd 与 .had</span>
         </div>
         <div id="radar-wrap" class="radar-wrap">
           <canvas id="radar-canvas"></canvas>
@@ -197,10 +199,10 @@
           <div class="float-head"><span>常用处理与自动建模</span><button data-close="toolbar-process-window">x</button></div>
           <div class="tool-body">
             <div class="button-row">
-              <button data-process="remove-dc">Remove DC</button>
-              <button data-process="global-bg">Remove Background</button>
-              <button data-process="gagc">Gaussian AGC</button>
-              <button data-process="fir-frequency">Bandpass</button>
+              <button data-process="remove-dc">Remove DC 去均值</button>
+              <button data-process="global-bg">Remove Background 去背景</button>
+              <button data-process="gagc">Gaussian AGC 高斯增益</button>
+              <button data-process="fir-frequency">Bandpass 带通</button>
               <button data-action="run-geology" class="primary">自动地质建模</button>
             </div>
             <p class="muted">处理结果进入 Output Data，可检查后 Hold。</p>
@@ -214,16 +216,16 @@
           <p class="muted">.2B、内部 MGP/MAT JSON、深度偏移、SEG-Y、DZT、SU、PNG/PDF 报告。</p>
           <label>数据源
             <select id="export-source">
-              <option value="current">Current Input Data</option>
-              <option value="output">Output Data</option>
+              <option value="current">Current Input Data 当前输入</option>
+              <option value="output">Output Data 输出数据</option>
             </select>
           </label>
           <div class="export-options">
             <label>SEG-Y dt (us)<input id="export-dt" type="number" value="0.001" step="0.0001"></label>
             <label>DZT dt (ns)<input id="export-dzt-dt" type="number" value="0.625" step="0.001"></label>
             <label>dx (m)<input id="export-dx" type="number" value="0.05" step="0.01"></label>
-            <label>Range (ns)<input id="export-range" type="number" value="1280" step="1"></label>
-            <label>Image cmap
+            <label>Range (ns) 时间范围<input id="export-range" type="number" value="1280" step="1"></label>
+            <label>Image cmap 图像色标
               <select id="export-cmap">
                 <option value="gray">Gray</option>
                 <option value="jet">Jet</option>
@@ -233,15 +235,15 @@
           </div>
           <div class="export-grid">
             <button data-export="2b">导出 .2B</button>
-            <button data-export="mgp">Save MGP/MAT JSON</button>
-            <button data-export="depth">Save Depth Migrated</button>
-            <button data-export="segy">SEG-Y Rev 1</button>
-            <button data-export="dzt">DZT</button>
-            <button data-export="su">SU</button>
-            <button data-export="csv">CSV</button>
-            <button data-export="bin">Float32 BIN</button>
-            <button data-export="png">PNG</button>
-            <button data-export="pdf">PDF</button>
+            <button data-export="mgp">Save MGP/MAT JSON 保存 MGP/MAT</button>
+            <button data-export="depth">Save Depth Migrated 保存深度偏移</button>
+            <button data-export="segy">SEG-Y Rev 1 SEG-Y 导出</button>
+            <button data-export="dzt">DZT 导出</button>
+            <button data-export="su">SU 导出</button>
+            <button data-export="csv">CSV 表格</button>
+            <button data-export="bin">Float32 BIN 二进制</button>
+            <button data-export="png">PNG 图像</button>
+            <button data-export="pdf">PDF 报告</button>
           </div>
         </div>
       </section>
@@ -254,6 +256,7 @@
         <div class="data-manager-actions">
           <span id="data-manager-selection" class="muted">未选择数据</span>
           <button id="data-merge-export" data-action="data-merge-export" disabled>合并导出 .2B</button>
+          <button id="data-delete-selected" data-action="data-delete-selected" disabled>删除所选</button>
           <button id="data-clear-selection" data-action="data-clear-selection" disabled>清空选择</button>
         </div>
         <div class="data-table-wrap">
@@ -299,7 +302,7 @@
           <canvas id="model-canvas"></canvas>
         </div>
         <aside class="panel">
-          <h2>Build 2-D Model</h2>
+          <h2>Build 2-D Model 构建二维模型</h2>
           <label>背景 εr<input id="model-epsr" type="number" value="9" step="0.1"></label>
           <label>背景 σ<input id="model-sigma" type="number" value="0" step="0.001"></label>
           <label>背景 μ<input id="model-mu" type="number" value="1" step="0.1"></label>
@@ -318,34 +321,52 @@
 
       <section id="page-interpret" class="page">
         <div class="panel narrow">
-          <h2>地质解释</h2>
-          <p>在偏移或时深转换结果上结合点、线、框标注识别界面、空洞、管线、破碎带等异常。</p>
-          <button data-action="open-trace">打开道查看器</button>
-          <button data-action="show-attenuation">计算衰减特征</button>
-          <button data-action="save-report">导出解释报告 JSON</button>
+          <h2>Geologic Interpretation 地质解释</h2>
+          <p>保留人工解释入口：结合点、线、框标注、道查看器和衰减特征识别界面、空洞、管线、破碎带等异常。</p>
+          <div class="button-row">
+            <button data-page="geo-modeling">Geologic Modeling 地质建模</button>
+            <button data-page="radar">Radar Profile 雷达剖面图</button>
+            <button data-action="open-trace">Trace Viewer 道查看器</button>
+            <button data-action="show-attenuation">Attenuation 衰减特征</button>
+            <button data-action="save-report">导出解释报告 JSON</button>
+          </div>
+          <div id="interpret-output" class="list muted">解释结果将在这里显示。</div>
+        </div>
+      </section>
+
+      <section id="page-geo-modeling" class="page">
+        <div class="panel narrow">
+          <h2>Geologic Modeling 地质建模</h2>
+          <p>自动追踪与手动流水线都在这里运行；地质解释页保留人工标注与报告入口。</p>
+          <div class="button-row">
+            <button data-page="interpret">Geologic Interpretation 地质解释</button>
+            <button data-action="open-trace">Trace Viewer 道查看器</button>
+            <button data-action="show-attenuation">Attenuation 衰减特征</button>
+            <button data-action="save-report">导出解释报告 JSON</button>
+          </div>
           <div class="geo-controls">
-            <label>velocity m/ns<input id="geo-velocity" type="number" value="0.10" step="0.01"></label>
-            <label>dt ns<input id="geo-dt" type="number" value="0.3125" step="0.0001"></label>
-            <label>dx m<input id="geo-dx" type="number" value="0.05" step="0.01"></label>
-            <label>low MHz<input id="geo-lo" type="number" value="20" step="1"></label>
-            <label>high MHz<input id="geo-hi" type="number" value="900" step="10"></label>
-            <label>background traces<input id="geo-bg" type="number" value="25" step="2"></label>
-            <label>AGC samples<input id="geo-agc" type="number" value="80" step="5"></label>
-            <label>model depth m<input id="geo-depth" type="number" value="24" step="1"></label>
+            <label>velocity m/ns 速度<input id="geo-velocity" type="number" value="0.10" step="0.01"></label>
+            <label>dt ns 采样间隔<input id="geo-dt" type="number" value="0.3125" step="0.0001"></label>
+            <label>dx m 道间距<input id="geo-dx" type="number" value="0.05" step="0.01"></label>
+            <label>low MHz 低频<input id="geo-lo" type="number" value="20" step="1"></label>
+            <label>high MHz 高频<input id="geo-hi" type="number" value="900" step="10"></label>
+            <label>background traces 背景道窗<input id="geo-bg" type="number" value="25" step="2"></label>
+            <label>AGC samples AGC 样点窗<input id="geo-agc" type="number" value="80" step="5"></label>
+            <label>model depth m 模型深度<input id="geo-depth" type="number" value="24" step="1"></label>
           </div>
           <div class="geo-toggles">
-            <label class="toggle-label"><input type="checkbox" id="geo-use-dewow" checked> Dewow</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-dc" checked> Remove DC</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-freq" checked> Freq Filter</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-bg" checked> Bg Remove</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-sliding" checked> Sliding Bg</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-equalize"> Equalize</label>
-            <label class="toggle-label">Gain:
+            <label class="toggle-label"><input type="checkbox" id="geo-use-dewow" checked> Dewow 去低频</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-dc" checked> Remove DC 去均值</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-freq" checked> Freq Filter 频率滤波</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-bg" checked> Bg Remove 背景去除</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-sliding" checked> Sliding Bg 滑动背景</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-equalize"> Equalize 均衡</label>
+            <label class="toggle-label">Gain 增益:
               <select id="geo-gain-method">
-                <option value="gagc">Gaussian AGC</option>
-                <option value="agc">Standard AGC</option>
-                <option value="power">Power Gain</option>
-                <option value="amplitude">Amplitude Decay</option>
+                <option value="gagc">Gaussian AGC 高斯 AGC</option>
+                <option value="agc">Standard AGC 标准 AGC</option>
+                <option value="power">Power Gain 幂增益</option>
+                <option value="amplitude">Amplitude Decay 振幅衰减</option>
               </select>
             </label>
           </div>
@@ -353,6 +374,23 @@
             <button class="primary" data-action="run-geology">自动提取界面并生成地质模型</button>
             <button data-action="export-geology">导出地质模型 JSON</button>
             <button data-action="export-geo-image">导出图像</button>
+          </div>
+          <div class="geo-pipeline">
+            <h3>手动地质建模流水线</h3>
+            <div class="geo-step-grid">
+              <button data-geo-step="geo-energy-envelope">1 能量包络</button>
+              <button data-geo-step="geo-smooth-2d">2 二维平滑</button>
+              <button data-geo-step="geo-trace-peaks">3 逐道峰值检测</button>
+              <button data-geo-step="geo-depth-histogram">4 深度直方图聚类</button>
+              <button data-geo-step="geo-cluster-peaks">5 聚类生成</button>
+              <button data-geo-step="geo-merge-clusters">6 聚类合并</button>
+              <button data-geo-step="geo-support-select">7 支持度筛选</button>
+              <button data-geo-step="geo-track-horizons">8 层位追踪</button>
+              <button data-geo-step="geo-line-smooth">9 线平滑</button>
+              <button data-geo-step="geo-stratigraphy">10 层序约束</button>
+              <button data-geo-step="geo-classify-model">11 地层分类模型生成</button>
+            </div>
+            <div id="geo-pipeline-report" class="list muted">手动流水线尚未运行。</div>
           </div>
           <div class="geo-canvas-grid">
             <div>
@@ -365,16 +403,15 @@
             </div>
           </div>
           <div id="geo-report" class="list muted">尚未生成自动地质模型。</div>
-          <div id="interpret-output" class="list muted">解释结果将在这里显示。</div>
         </div>
       </section>
 
       <section id="page-three" class="page">
         <div class="panel narrow">
-          <h2>3-D Utilities</h2>
+          <h2>3-D Utilities 三维工具</h2>
           <p class="muted">第一版支持把多条二维剖面按固定测线间距合成为体数据，并显示 X/Y/Z 切片。</p>
           <label>测线间距 Y (m)<input id="three-dy" type="number" value="1" step="0.1"></label>
-          <button data-action="create-3d">Create 3-D Data</button>
+          <button data-action="create-3d">Create 3-D Data 创建三维数据</button>
           <label>切片方向
             <select id="three-axis">
               <option value="z">Z 时间/深度切片</option>
@@ -392,6 +429,8 @@
     <aside class="side">
       <h3>数据状态</h3>
       <div id="state-panel" class="state-panel">暂无数据</div>
+      <h3>已导入数据</h3>
+      <div id="side-dataset-list" class="side-dataset-list">暂无数据</div>
       <h3>处理历史</h3>
       <div id="history-panel" class="history-panel">暂无历史</div>
     </aside>
@@ -438,7 +477,7 @@
 
   <dialog id="undo-dialog">
     <form method="dialog">
-      <h2>Undo / Restore</h2>
+      <h2>Undo / Restore 撤销/恢复</h2>
       <div id="undo-list" class="dialog-fields"></div>
       <menu>
         <button value="cancel">关闭</button>
