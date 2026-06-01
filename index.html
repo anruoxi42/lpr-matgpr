@@ -351,6 +351,13 @@
             <button data-action="save-report">导出解释报告 JSON</button>
           </div>
           <div class="geo-controls">
+            <label>auto mode 自动策略
+              <select id="geo-auto-mode">
+                <option value="conservative">Conservative 保守可信</option>
+                <option value="complete">Complete 尽量完整</option>
+              </select>
+            </label>
+            <label>quality threshold 质量阈值<input id="geo-quality-threshold" type="number" value="70" min="0" max="100" step="5"></label>
             <label>velocity m/ns 速度<input id="geo-velocity" type="number" value="0.10" step="0.01"></label>
             <label>dt ns 采样间隔<input id="geo-dt" type="number" value="0.3125" step="0.0001"></label>
             <label>dx m 道间距<input id="geo-dx" type="number" value="0.05" step="0.01"></label>
@@ -367,6 +374,7 @@
             <label class="toggle-label"><input type="checkbox" id="geo-use-bg" checked> Bg Remove 背景去除</label>
             <label class="toggle-label"><input type="checkbox" id="geo-use-sliding" checked> Sliding Bg 滑动背景</label>
             <label class="toggle-label"><input type="checkbox" id="geo-use-equalize"> Equalize 均衡</label>
+            <label class="toggle-label"><input type="checkbox" id="geo-use-migration"> Migration 偏移辅助</label>
             <label class="toggle-label">Gain 增益:
               <select id="geo-gain-method">
                 <option value="gagc">Gaussian AGC 高斯 AGC</option>
@@ -398,30 +406,45 @@
       <section id="page-manual-geo" class="page">
         <div class="manual-geo-shell">
           <div class="manual-geo-toolbar">
-            <button data-geo-step="geo-energy-envelope">1 能量包络</button>
-            <button data-geo-step="geo-smooth-2d">2 二维平滑</button>
-            <button data-geo-step="geo-trace-peaks">3 逐道峰值检测</button>
-            <button data-geo-step="geo-depth-histogram">4 深度直方图聚类</button>
-            <button data-geo-step="geo-cluster-peaks">5 聚类生成</button>
-            <button data-geo-step="geo-merge-clusters">6 聚类合并</button>
-            <button data-geo-step="geo-support-select">7 支持度筛选</button>
-            <button data-geo-step="geo-track-horizons">8 层位追踪</button>
-            <button data-geo-step="geo-line-smooth">9 线平滑</button>
-            <button data-geo-step="geo-stratigraphy">10 层序约束</button>
-            <button data-geo-step="geo-classify-model">11 地层分类模型</button>
+            <label>view 视图
+              <select id="manual-display-mode">
+                <option value="radar">Radar 雷达剖面</option>
+                <option value="processed">Processed 处理后</option>
+                <option value="boundary">Boundary probability 边界概率</option>
+                <option value="envelope">Envelope 包络</option>
+                <option value="phase">Phase 相位</option>
+                <option value="frequency">Instant frequency 瞬时频率</option>
+                <option value="semblance">Semblance 相干性</option>
+                <option value="auto">Auto horizons 自动层位</option>
+              </select>
+            </label>
+            <button data-manual-tool="draw" class="active">Draw 画笔</button>
+            <button data-manual-tool="polyline">Polyline 折线</button>
+            <button data-manual-tool="drag">Edit 编辑</button>
+            <button data-manual-tool="erase">Erase 橡皮</button>
+            <button data-manual-tool="seed">Seed trace 种子追踪</button>
+            <label class="toggle-label"><input type="checkbox" id="manual-snap" checked> Snap 吸附</label>
           </div>
           <div class="manual-geo-actions">
             <button data-page="geo-modeling">Auto Geologic Modeling 自动建模</button>
             <button data-action="open-radar-params">Radar Parameters 雷达参数</button>
-            <button data-action="manual-geo-save" class="primary">保存当前步骤到 Output</button>
+            <button data-action="manual-new-layer">New Horizon 新建层位</button>
+            <button data-action="manual-compute-aids">Compute Aids 计算辅助图</button>
+            <button data-action="manual-import-auto">Use Auto Suggestions 使用自动建议</button>
+            <button data-action="manual-undo">Undo 撤销</button>
+            <button data-action="manual-redo">Redo 重做</button>
+            <button data-action="manual-generate-model" class="primary">Generate Manual Model 生成手动模型</button>
+            <button data-action="manual-geo-save">Save Model to Output 保存模型</button>
           </div>
           <div class="manual-geo-view">
             <div class="manual-geo-main">
               <canvas id="manual-geo-radar-canvas"></canvas>
             </div>
             <aside class="manual-geo-side">
-              <div id="manual-geo-report" class="list muted">手动流水线尚未运行。</div>
+              <div id="manual-layer-list" class="list muted">尚未创建手动层位。</div>
+              <div id="manual-geo-report" class="list muted">手动解释工作台尚未生成模型。</div>
               <div class="manual-geo-chart-wrap"><canvas id="manual-geo-chart-canvas"></canvas></div>
+              <div class="manual-geo-chart-wrap"><canvas id="manual-geo-spectrum-canvas"></canvas></div>
               <div class="manual-geo-model-wrap"><canvas id="manual-geo-model-canvas"></canvas></div>
             </aside>
           </div>
