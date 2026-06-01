@@ -125,6 +125,8 @@ export function summarizeMeta(meta = {}) {
     firstPosition: [meta.posX?.[0] || 0, meta.posY?.[0] || 0, meta.posZ?.[0] || 0],
     dtNs: meta.dtNs || DEFAULT_DT_NS,
     dxM: meta.dxM || DEFAULT_DX_M,
+    radarParams: meta.radarParams || null,
+    headerSuggestions: meta.headerSuggestions || null,
     remainder: meta.remainder || 0
   };
 }

@@ -2,11 +2,14 @@ import * as A from "../processing/algorithms.js";
 
 function axisParams(dataset, params = {}) {
   const meta = dataset.meta || {};
-  const dtNs = Number(params.dtNs ?? params.dt ?? dataset.dtNs ?? meta.dtNs ?? 0.625);
-  const dxM = Number(params.dxM ?? params.dx ?? dataset.dxM ?? meta.dxM ?? 0.05);
+  const rp = meta.radarParams || {};
+  const dtNs = Number(params.dtNs ?? params.dt ?? dataset.dtNs ?? rp.dtNs ?? meta.dtNs ?? 0.625);
+  const dxM = Number(params.dxM ?? params.dx ?? dataset.dxM ?? rp.dxM ?? meta.dxM ?? 0.05);
   return {
     dtNs: Number.isFinite(dtNs) && dtNs > 0 ? dtNs : 0.625,
-    dxM: Number.isFinite(dxM) && dxM > 0 ? dxM : 0.05
+    dxM: Number.isFinite(dxM) && dxM > 0 ? dxM : 0.05,
+    velocityMPerNs: Number(params.velocity ?? params.velocityMPerNs ?? rp.velocityMPerNs ?? 0.1),
+    vofhText: String(params.vofh ?? params.vofhText ?? rp.vofhText ?? "0.1,0")
   };
 }
 
@@ -24,6 +27,13 @@ function withUpdatedMeta(result, dataset, params = {}) {
   const dxM = result.dxM || axes.dxM;
   meta.dtNs = dtNs;
   meta.dxM = dxM;
+  meta.radarParams = {
+    ...(meta.radarParams || {}),
+    dtNs,
+    dxM,
+    velocityMPerNs: Number.isFinite(axes.velocityMPerNs) && axes.velocityMPerNs > 0 ? axes.velocityMPerNs : 0.1,
+    vofhText: axes.vofhText
+  };
   meta.sampleRateHz = 1 / (dtNs * 1e-9);
   if (result.verticalAxisKind === "depth" || result.depthAxisM || result.depthStep) {
     meta.verticalAxisKind = "depth";

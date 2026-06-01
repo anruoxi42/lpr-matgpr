@@ -108,6 +108,19 @@ export class IpdStore extends EventTarget {
     this.emit();
     return true;
   }
+  updateCurrentMeta(meta = {}) {
+    if (!this.ipd?.current) return false;
+    const id = this.ipd.current.managerId || this.ipd.current.id;
+    const nextMeta = { ...(this.ipd.current.meta || {}), ...meta };
+    this.ipd.current.meta = nextMeta;
+    if (this.ipd.rawData && (this.ipd.rawData.managerId === id || this.ipd.rawData.id === id)) this.ipd.rawData.meta = nextMeta;
+    if (this.output && (this.output.managerId === id || this.output.id === id)) this.output.meta = nextMeta;
+    const item = this.getManagedDataset(id);
+    if (item) item.meta = nextMeta;
+    this.snapshots = this.snapshots.map(s => (s.managerId === id || s.id === id) ? cloneDataset({ ...s, meta: nextMeta }) : s);
+    this.emit();
+    return true;
+  }
   deleteManagedDatasets(ids = []) {
     const removeIds = new Set(Array.from(ids).filter(Boolean));
     if (!removeIds.size) return 0;

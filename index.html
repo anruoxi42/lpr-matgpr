@@ -105,6 +105,7 @@
         <button>建模与解释</button>
         <div class="menu">
           <button data-page="geo-modeling">Geologic Modeling 地质建模</button>
+          <button data-page="manual-geo">Manual Geologic Pipeline 手动地质流水线</button>
           <button data-page="interpret">Geologic Interpretation 地质解释</button>
           <button data-page="model">Build 2-D Model 构建二维模型</button>
           <button data-action="forward">正演模拟</button>
@@ -139,6 +140,7 @@
           <span class="sep"></span>
           <button data-action="radar-reset">重置</button>
           <button id="depth-axis-toggle" data-action="toggle-depth-axis">深度轴</button>
+          <button data-action="open-radar-params">Radar Parameters 雷达参数</button>
           <button data-action="open-trace">波形</button>
           <button data-popup="toolbar-process-window">处理</button>
           <button class="primary" data-action="open-import">导入数据</button>
@@ -256,6 +258,7 @@
         <div class="data-manager-actions">
           <span id="data-manager-selection" class="muted">未选择数据</span>
           <button id="data-merge-export" data-action="data-merge-export" disabled>合并导出 .2B</button>
+          <button data-action="open-radar-params">雷达参数</button>
           <button id="data-delete-selected" data-action="data-delete-selected" disabled>删除所选</button>
           <button id="data-clear-selection" data-action="data-clear-selection" disabled>清空选择</button>
         </div>
@@ -325,6 +328,7 @@
           <p>保留人工解释入口：结合点、线、框标注、道查看器和衰减特征识别界面、空洞、管线、破碎带等异常。</p>
           <div class="button-row">
             <button data-page="geo-modeling">Geologic Modeling 地质建模</button>
+            <button data-page="manual-geo">Manual Pipeline 手动流水线</button>
             <button data-page="radar">Radar Profile 雷达剖面图</button>
             <button data-action="open-trace">Trace Viewer 道查看器</button>
             <button data-action="show-attenuation">Attenuation 衰减特征</button>
@@ -337,9 +341,11 @@
       <section id="page-geo-modeling" class="page">
         <div class="panel narrow">
           <h2>Geologic Modeling 地质建模</h2>
-          <p>自动追踪与手动流水线都在这里运行；地质解释页保留人工标注与报告入口。</p>
+          <p>一键自动追踪与地质模型结果在这里运行；手动流水线已拆分到独立页面。</p>
           <div class="button-row">
             <button data-page="interpret">Geologic Interpretation 地质解释</button>
+            <button data-page="manual-geo">Manual Geologic Pipeline 手动地质流水线</button>
+            <button data-action="open-radar-params">Radar Parameters 雷达参数</button>
             <button data-action="open-trace">Trace Viewer 道查看器</button>
             <button data-action="show-attenuation">Attenuation 衰减特征</button>
             <button data-action="save-report">导出解释报告 JSON</button>
@@ -375,23 +381,6 @@
             <button data-action="export-geology">导出地质模型 JSON</button>
             <button data-action="export-geo-image">导出图像</button>
           </div>
-          <div class="geo-pipeline">
-            <h3>手动地质建模流水线</h3>
-            <div class="geo-step-grid">
-              <button data-geo-step="geo-energy-envelope">1 能量包络</button>
-              <button data-geo-step="geo-smooth-2d">2 二维平滑</button>
-              <button data-geo-step="geo-trace-peaks">3 逐道峰值检测</button>
-              <button data-geo-step="geo-depth-histogram">4 深度直方图聚类</button>
-              <button data-geo-step="geo-cluster-peaks">5 聚类生成</button>
-              <button data-geo-step="geo-merge-clusters">6 聚类合并</button>
-              <button data-geo-step="geo-support-select">7 支持度筛选</button>
-              <button data-geo-step="geo-track-horizons">8 层位追踪</button>
-              <button data-geo-step="geo-line-smooth">9 线平滑</button>
-              <button data-geo-step="geo-stratigraphy">10 层序约束</button>
-              <button data-geo-step="geo-classify-model">11 地层分类模型生成</button>
-            </div>
-            <div id="geo-pipeline-report" class="list muted">手动流水线尚未运行。</div>
-          </div>
           <div class="geo-canvas-grid">
             <div>
               <h3>处理后雷达剖面与自动界面</h3>
@@ -403,6 +392,39 @@
             </div>
           </div>
           <div id="geo-report" class="list muted">尚未生成自动地质模型。</div>
+        </div>
+      </section>
+
+      <section id="page-manual-geo" class="page">
+        <div class="manual-geo-shell">
+          <div class="manual-geo-toolbar">
+            <button data-geo-step="geo-energy-envelope">1 能量包络</button>
+            <button data-geo-step="geo-smooth-2d">2 二维平滑</button>
+            <button data-geo-step="geo-trace-peaks">3 逐道峰值检测</button>
+            <button data-geo-step="geo-depth-histogram">4 深度直方图聚类</button>
+            <button data-geo-step="geo-cluster-peaks">5 聚类生成</button>
+            <button data-geo-step="geo-merge-clusters">6 聚类合并</button>
+            <button data-geo-step="geo-support-select">7 支持度筛选</button>
+            <button data-geo-step="geo-track-horizons">8 层位追踪</button>
+            <button data-geo-step="geo-line-smooth">9 线平滑</button>
+            <button data-geo-step="geo-stratigraphy">10 层序约束</button>
+            <button data-geo-step="geo-classify-model">11 地层分类模型</button>
+          </div>
+          <div class="manual-geo-actions">
+            <button data-page="geo-modeling">Auto Geologic Modeling 自动建模</button>
+            <button data-action="open-radar-params">Radar Parameters 雷达参数</button>
+            <button data-action="manual-geo-save" class="primary">保存当前步骤到 Output</button>
+          </div>
+          <div class="manual-geo-view">
+            <div class="manual-geo-main">
+              <canvas id="manual-geo-radar-canvas"></canvas>
+            </div>
+            <aside class="manual-geo-side">
+              <div id="manual-geo-report" class="list muted">手动流水线尚未运行。</div>
+              <div class="manual-geo-chart-wrap"><canvas id="manual-geo-chart-canvas"></canvas></div>
+              <div class="manual-geo-model-wrap"><canvas id="manual-geo-model-canvas"></canvas></div>
+            </aside>
+          </div>
         </div>
       </section>
 
@@ -431,6 +453,7 @@
       <div id="state-panel" class="state-panel">暂无数据</div>
       <h3>已导入数据</h3>
       <div id="side-dataset-list" class="side-dataset-list">暂无数据</div>
+      <button data-action="open-radar-params" class="side-param-button">Radar Parameters 雷达参数</button>
       <h3>处理历史</h3>
       <div id="history-panel" class="history-panel">暂无历史</div>
     </aside>

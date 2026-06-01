@@ -17,6 +17,8 @@ let radarAnnotations = [];
 let lastMergedSelection = null;
 let geologyResult = null;
 let geologyPipelineState = {};
+let activeManualGeoOp = "";
+let manualGeoResult = null;
 let dataManagerSelection = new Set();
 let velocityRenderer = null;
 let velocityPreviewPoint = null;
@@ -104,7 +106,7 @@ function runWorker(op, dataset, params = {}) {
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     const copy = new Float32Array(dataset.data);
-    worker.postMessage({ id, op, params, dataset: { ...dataset, data: copy.buffer } }, [copy.buffer]);
+    worker.postMessage({ id, op, params: normalizeWorkerParams(dataset, params), dataset: { ...dataset, data: copy.buffer } }, [copy.buffer]);
   });
 }
 worker.onmessage = ({ data }) => {
@@ -116,6 +118,7 @@ worker.onmessage = ({ data }) => {
 
 function refresh() {
   const ds = currentDisplayed();
+  const rp = getEffectiveRadarParams(store.current);
   $("#dataset-title").textContent = store.ipd ? `${store.ipd.name} · ${displaySource === "output" && store.output ? "Output Data" : "Current Input Data"}` : "未加载数据";
   $("#drop-zone").classList.toggle("hidden", !!store.current);
   radar.setDataset(ds);
@@ -123,7 +126,8 @@ function refresh() {
   $("#state-panel").innerHTML = store.ipd ? [
     row("Current", `${store.current.numTraces} 道 × ${store.current.numSamples} 样点`),
     row("Output", store.output ? `${store.output.numTraces} 道 × ${store.output.numSamples} 样点，待验收` : "无"),
-    row("dt / dx", `${(store.current.meta?.dtNs || store.current.dtNs || 0.625).toFixed?.(4) || store.current.meta?.dtNs || 0.625} ns · ${(store.current.meta?.dxM || store.current.dxM || 0.05).toFixed?.(4) || store.current.meta?.dxM || 0.05} m`),
+    row("dt / dx", `${rp.dtNs.toFixed(4)} ns · ${rp.dxM.toFixed(4)} m`),
+    row("速度", `${rp.velocityMPerNs.toFixed(3)} m/ns · εr ${rp.epsilonR.toFixed(2)}`),
     row("历史", `${store.ipd.history.length} 步`),
     row("格式", store.current.meta?.sourceFormat || ".2B")
   ].join("") : "暂无数据";
@@ -145,12 +149,142 @@ function finiteNumber(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function optionalNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : NaN;
+}
+
+function medianPositive(values) {
+  if (!values?.length) return NaN;
+  const clean = Array.from(values).filter(v => Number.isFinite(Number(v)) && Number(v) > 0).map(Number).sort((a, b) => a - b);
+  return clean.length ? clean[Math.floor(clean.length / 2)] : NaN;
+}
+
+function axis(count, step, offset = 0) {
+  const out = new Float32Array(Math.max(0, Math.floor(count || 0)));
+  for (let i = 0; i < out.length; i++) out[i] = offset + i * step;
+  return out;
+}
+
+function velocityFromEps(eps, fallback = 0.1) {
+  const er = optionalNumber(eps);
+  return Number.isFinite(er) ? 0.299792458 / Math.sqrt(er) : fallback;
+}
+
+function epsFromVelocity(velocity) {
+  const v = finiteNumber(velocity, 0.1);
+  return (0.299792458 / v) ** 2;
+}
+
+function buildRadarMetadata(dataset) {
+  const meta = { ...(dataset.meta || {}) };
+  const isHcd = String(meta.sourceFormat || "").toUpperCase() === ".HCD";
+  const dtDefault = finiteNumber(meta.dtNs ?? dataset.dtNs, isHcd ? 0.3125 : 0.625);
+  const dxDefault = finiteNumber(meta.dxM ?? dataset.dxM, isHcd ? 1 : 0.05);
+  const fileVelocity = medianPositive(meta.velocity);
+  const antennaFreq = optionalNumber(meta.antennaFreqMHz ?? meta.frequencyMHz);
+  const saved = meta.radarParams || {};
+  const velocity = finiteNumber(saved.velocityMPerNs ?? saved.velocity ?? 0.1, 0.1);
+  const vofhText = String(saved.vofhText || saved.vofh || `${velocity},0`);
+  const depthMax = finiteNumber(saved.depthMaxM, Math.max(0, (dataset.numSamples || 1) - 1) * dtDefault * velocity / 2);
+  const radarParams = {
+    dtNs: finiteNumber(saved.dtNs, dtDefault),
+    dxM: finiteNumber(saved.dxM, dxDefault),
+    velocityMPerNs: velocity,
+    vofhText,
+    epsilonR: finiteNumber(saved.epsilonR, epsFromVelocity(velocity)),
+    antennaFreqMHz: Number.isFinite(antennaFreq) ? antennaFreq : "",
+    freqLowMHz: finiteNumber(saved.freqLowMHz, 20),
+    freqHighMHz: finiteNumber(saved.freqHighMHz, Number.isFinite(antennaFreq) ? Math.min(900, antennaFreq * 2.5) : 900),
+    q: saved.q ?? "",
+    timeZeroSample: Number.isFinite(Number(saved.timeZeroSample)) ? Number(saved.timeZeroSample) : 0,
+    depthDzM: finiteNumber(saved.depthDzM, 0.02),
+    depthMaxM: depthMax
+  };
+  const headerSuggestions = {
+    ...(meta.headerSuggestions || {}),
+    sourceFormat: meta.sourceFormat || ".2B",
+    dtNs: dtDefault,
+    dtSource: isHcd ? ".hcd/.had MATLAB default" : ".2B format default, not parsed from file",
+    dxM: dxDefault,
+    dxSource: isHcd ? ".had TRACE INCREMENT / USER DISTANCE INTERVAL" : ".2B position-derived median or format default",
+    fileVelocityMPerNs: Number.isFinite(fileVelocity) ? fileVelocity : "",
+    fileVelocityNote: ".2B record velocity is preserved as a suggestion only, not used as subsurface radar velocity",
+    soilVelocityRaw: Number.isFinite(Number(meta.soilVelocityRaw)) ? Number(meta.soilVelocityRaw) : "",
+    antennaFreqMHz: Number.isFinite(antennaFreq) ? antennaFreq : "",
+    frequencyMHz: Number.isFinite(Number(meta.frequencyMHz)) ? Number(meta.frequencyMHz) : "",
+    timeWindowNs: Number.isFinite(Number(meta.timeWindowNs)) ? Number(meta.timeWindowNs) : "",
+    antenna: meta.antenna || ""
+  };
+  meta.radarParams = radarParams;
+  meta.headerSuggestions = headerSuggestions;
+  meta.dtNs = radarParams.dtNs;
+  meta.dxM = radarParams.dxM;
+  meta.sampleRateHz = 1 / (radarParams.dtNs * 1e-9);
+  meta.timeAxisNs = axis(dataset.numSamples, radarParams.dtNs, radarParams.timeZeroSample * radarParams.dtNs);
+  meta.tt2w = meta.timeAxisNs;
+  meta.distanceAxisM = axis(dataset.numTraces, radarParams.dxM);
+  meta.x = meta.distanceAxisM;
+  meta.vofh = radarParams.vofhText;
+  return { ...dataset, meta, dtNs: radarParams.dtNs, dxM: radarParams.dxM };
+}
+
+function getEffectiveRadarParams(ds, overrides = {}) {
+  const meta = ds?.meta || {};
+  const rp = meta.radarParams || {};
+  const hs = meta.headerSuggestions || {};
+  const fallbackDt = String(meta.sourceFormat || "").toUpperCase() === ".HCD" ? 0.3125 : 0.625;
+  const dtNs = finiteNumber(overrides.dtNs ?? overrides.dt ?? rp.dtNs ?? meta.dtNs ?? hs.dtNs, fallbackDt);
+  const dxM = finiteNumber(overrides.dxM ?? overrides.dx ?? rp.dxM ?? meta.dxM ?? hs.dxM, 0.05);
+  const vofhText = String(overrides.vofh ?? overrides.vofhText ?? rp.vofhText ?? meta.vofh ?? "0.1,0");
+  const vofhVelocity = parseVofh(vofhText || "0.1,0")[0]?.[0];
+  const velocityMPerNs = finiteNumber(overrides.velocity ?? overrides.velocityMPerNs ?? rp.velocityMPerNs ?? vofhVelocity, 0.1);
+  const epsilonR = finiteNumber(overrides.epsilonR ?? rp.epsilonR, epsFromVelocity(velocityMPerNs));
+  const qRaw = overrides.q ?? rp.q;
+  return {
+    dtNs,
+    dxM,
+    dt: dtNs,
+    dx: dxM,
+    velocity: velocityMPerNs,
+    velocityMPerNs,
+    vofh: vofhText,
+    vofhText,
+    epsilonR,
+    antennaFreqMHz: optionalNumber(overrides.antennaFreqMHz ?? rp.antennaFreqMHz ?? hs.antennaFreqMHz),
+    freqLowMHz: finiteNumber(overrides.freqLowMHz ?? overrides.flowMHz ?? overrides.loMHz ?? rp.freqLowMHz, 20),
+    freqHighMHz: finiteNumber(overrides.freqHighMHz ?? overrides.fhighMHz ?? overrides.hiMHz ?? rp.freqHighMHz, 900),
+    q: qRaw === "" || qRaw == null ? "" : (Number.isFinite(Number(qRaw)) ? Number(qRaw) : ""),
+    timeZeroSample: Number.isFinite(Number(overrides.timeZeroSample ?? rp.timeZeroSample)) ? Number(overrides.timeZeroSample ?? rp.timeZeroSample) : 0,
+    depthDzM: finiteNumber(overrides.depthDzM ?? overrides.dzM ?? overrides.dz ?? rp.depthDzM, 0.02),
+    depthMaxM: finiteNumber(overrides.depthMaxM ?? overrides.zMaxM ?? overrides.zMax ?? rp.depthMaxM, Math.max(0, (ds?.numSamples || 1) - 1) * dtNs * velocityMPerNs / 2)
+  };
+}
+
+function normalizeWorkerParams(ds, params = {}) {
+  const rp = getEffectiveRadarParams(ds, params);
+  return {
+    ...rp,
+    ...params,
+    dtNs: params.dtNs ?? params.dt ?? rp.dtNs,
+    dxM: params.dxM ?? params.dx ?? rp.dxM,
+    dt: params.dt ?? params.dtNs ?? rp.dtNs,
+    dx: params.dx ?? params.dxM ?? rp.dxM,
+    velocity: params.velocity ?? params.velocityMPerNs ?? rp.velocityMPerNs,
+    vofh: params.vofh ?? params.vofhText ?? rp.vofhText,
+    dzM: params.dzM ?? params.dz ?? rp.depthDzM,
+    zMaxM: params.zMaxM ?? params.zMax ?? rp.depthMaxM,
+    antennaFreqMHz: params.antennaFreqMHz ?? rp.antennaFreqMHz,
+    q: params.q ?? rp.q
+  };
+}
+
 function datasetDtNs(ds) {
-  return finiteNumber(ds?.meta?.dtNs ?? ds?.dtNs, 0.625);
+  return getEffectiveRadarParams(ds).dtNs;
 }
 
 function datasetDxM(ds) {
-  return finiteNumber(ds?.meta?.dxM ?? ds?.dxM, 0.05);
+  return getEffectiveRadarParams(ds).dxM;
 }
 
 function firstFiniteAxisValue(axis) {
@@ -165,7 +299,7 @@ function firstFiniteAxisValue(axis) {
 function velocityFromGeoControl() {
   const inputVelocity = finiteNumber($("#geo-velocity")?.value, NaN);
   if (Number.isFinite(inputVelocity)) return inputVelocity;
-  return parseVofh(currentVofhText || "0.1,0")[0]?.[0] || 0.1;
+  return getEffectiveRadarParams(currentDisplayed()).velocityMPerNs;
 }
 
 function inferredDepthMax(ds, dtNs = datasetDtNs(ds), velocity = velocityFromGeoControl()) {
@@ -174,7 +308,7 @@ function inferredDepthMax(ds, dtNs = datasetDtNs(ds), velocity = velocityFromGeo
   if (Number.isFinite(axisDepth) && axisDepth > 0) return axisDepth;
   const depthStep = finiteNumber(ds.depthStep ?? ds.meta?.depthStep, NaN);
   if (Number.isFinite(depthStep)) return Math.max(0, ds.numSamples - 1) * depthStep;
-  return Math.max(0, ds.numSamples - 1) * dtNs * velocity / 2;
+  return getEffectiveRadarParams(ds, { dtNs, velocity }).depthMaxM;
 }
 
 function formatDepthInput(value) {
@@ -196,13 +330,17 @@ function updateGeoDepthFromControls(force = false) {
 function syncGeoControlsFromDataset(force = false) {
   const ds = currentDisplayed();
   if (!ds) return;
-  const key = [ds.id || ds.name || "", ds.numTraces, ds.numSamples, datasetDtNs(ds), datasetDxM(ds)].join("|");
+  const rp = getEffectiveRadarParams(ds);
+  const key = [ds.id || ds.name || "", ds.numTraces, ds.numSamples, rp.dtNs, rp.dxM, rp.velocityMPerNs, rp.depthMaxM].join("|");
   if (!force && key === lastGeoDatasetKey) return;
   const dtEl = $("#geo-dt"), dxEl = $("#geo-dx"), velEl = $("#geo-velocity"), depthEl = $("#geo-depth");
-  if (dtEl) dtEl.value = datasetDtNs(ds).toFixed(4);
-  if (dxEl) dxEl.value = datasetDxM(ds).toFixed(4);
-  if (velEl && !Number.isFinite(Number(velEl.value))) velEl.value = "0.100";
+  if (dtEl) dtEl.value = rp.dtNs.toFixed(4);
+  if (dxEl) dxEl.value = rp.dxM.toFixed(4);
+  if (velEl) velEl.value = rp.velocityMPerNs.toFixed(3);
+  if ($("#geo-lo")) $("#geo-lo").value = rp.freqLowMHz;
+  if ($("#geo-hi")) $("#geo-hi").value = rp.freqHighMHz;
   if (depthEl) depthEl.dataset.manual = "false";
+  currentVofhText = rp.vofhText;
   lastGeoDatasetKey = key;
   updateGeoDepthFromControls(true);
 }
@@ -217,8 +355,8 @@ function fallbackDepthAxis(ds) {
     for (let i = 0; i < out.length; i++) out[i] = i * step;
     return out;
   }
-  const dtNs = ds.meta?.dtNs || ds.dtNs || 0.625;
-  return depthAxisFromVofh(ds.numSamples, dtNs, currentVofhText || ds.meta?.vofh || "0.1,0");
+  const rp = getEffectiveRadarParams(ds);
+  return depthAxisFromVofh(ds.numSamples, rp.dtNs, rp.vofhText || `${rp.velocityMPerNs},0`);
 }
 
 function applyDepthAxisMode() {
@@ -237,7 +375,8 @@ function fileStem(name) {
 }
 
 function finishImport(parsed, file) {
-  store.loadDataset({ ...parsed, name: file.name, fileSize: file.size, loadedAt: new Date().toLocaleString("zh-CN") });
+  const enriched = buildRadarMetadata({ ...parsed, name: file.name, fileSize: file.size, loadedAt: new Date().toLocaleString("zh-CN") });
+  store.loadDataset(enriched);
   if (parsed.meta?.sourceFormat === ".HCD") {
     $("#amp-min").value = parsed.meta.displayAmpMin ?? HCD_DEFAULT_AMP.min;
     $("#amp-max").value = parsed.meta.displayAmpMax ?? HCD_DEFAULT_AMP.max;
@@ -334,9 +473,17 @@ function openProcess(op) {
   const [title, fields] = processDefs[op] || [op, []];
   const fieldValue = f => {
     const ds = store.current;
-    if (f.id === "vofh") return formatVofh(ds.meta?.vofh) || currentVofhText || f.value;
-    if (f.id === "dtNs") return ds.meta?.dtNs || ds.dtNs || f.value;
-    if (f.id === "dxM") return ds.meta?.dxM || ds.dxM || f.value;
+    const rp = getEffectiveRadarParams(ds);
+    if (f.id === "vofh") return rp.vofhText || currentVofhText || f.value;
+    if (f.id === "dtNs" || f.id === "dt") return rp.dtNs;
+    if (f.id === "dxM" || f.id === "dx") return rp.dxM;
+    if (f.id === "velocity") return rp.velocityMPerNs;
+    if (f.id === "dzM") return rp.depthDzM;
+    if (f.id === "zMaxM") return rp.depthMaxM;
+    if (f.id === "antennaFreqMHz") return Number.isFinite(rp.antennaFreqMHz) ? rp.antennaFreqMHz : f.value;
+    if (f.id === "q") return rp.q || f.value;
+    if (["lo", "flowMHz"].includes(f.id)) return rp.freqLowMHz;
+    if (["hi", "fhighMHz"].includes(f.id)) return rp.freqHighMHz;
     if (f.id === "samples") return ds.numSamples;
     if (f.id === "traces") return ds.numTraces;
     if (f.id === "end") return ds.numSamples - 1;
@@ -355,7 +502,8 @@ function openProcess(op) {
       const params = {};
       $$("[data-field]").forEach(i => {
         const key = i.dataset.field;
-        params[key] = isNaN(Number(i.value)) || ["type", "ranges", "curve", "attr", "power", "output", "vofh", "gain"].includes(key) ? i.value : Number(i.value);
+        const raw = i.value.trim();
+        params[key] = raw === "" || isNaN(Number(raw)) || ["type", "ranges", "curve", "attr", "power", "output", "vofh", "gain"].includes(key) ? raw : Number(raw);
       });
       if (params.vofh) currentVofhText = params.vofh;
       $("#process-dialog").close();
@@ -399,6 +547,95 @@ function showAlgorithmHelp() {
       <p><b>原理：</b>${escapeHtml(principle)}</p>
       <p><b>用法：</b>${escapeHtml(usage)}</p>
     </article>`).join("");
+  dlg.showModal();
+}
+
+const radarParamFields = [
+  ["dtNs", "dt ns 采样间隔"],
+  ["dxM", "dx m 道间距"],
+  ["velocityMPerNs", "velocity m/ns 介质速度"],
+  ["epsilonR", "epsilon_r 相对介电常数"],
+  ["antennaFreqMHz", "antenna MHz 天线频率"],
+  ["freqLowMHz", "low MHz 默认低频"],
+  ["freqHighMHz", "high MHz 默认高频"],
+  ["q", "Q 可空"],
+  ["timeZeroSample", "time zero sample 时间零点"],
+  ["depthDzM", "depth dz m 深度步长"],
+  ["depthMaxM", "depth max m 最大深度"]
+];
+
+function ensureRadarParamsDialog() {
+  let dlg = $("#radar-params-dialog");
+  if (dlg) return dlg;
+  dlg = document.createElement("dialog");
+  dlg.id = "radar-params-dialog";
+  dlg.className = "wide-dialog radar-params-dialog";
+  dlg.innerHTML = `
+    <form method="dialog">
+      <h2>Radar Parameters 雷达参数</h2>
+      <p class="muted">文件头只作为建议值；保存后参数跟随当前数据集，并用于深度轴、偏移、滤波、地质建模和导出。</p>
+      <div class="radar-param-grid" id="radar-param-fields"></div>
+      <label>vofhText 层状速度模型<textarea id="radar-param-vofh" rows="4"></textarea></label>
+      <h3>Header Suggestions 文件头建议</h3>
+      <div id="radar-param-suggestions" class="list muted"></div>
+      <menu>
+        <button value="cancel">取消</button>
+        <button id="radar-param-save" value="default" class="primary">保存到当前数据集</button>
+      </menu>
+    </form>`;
+  document.body.appendChild(dlg);
+  return dlg;
+}
+
+function formatSuggestionValue(value) {
+  if (value == null || value === "") return "无";
+  if (typeof value === "number") return Number.isFinite(value) ? value.toFixed(Math.abs(value) >= 10 ? 3 : 5).replace(/\.?0+$/, "") : "无";
+  return String(value);
+}
+
+function openRadarParamsDialog() {
+  const ds = store.current;
+  if (!ds) return toast("请先导入数据", "warn");
+  const dlg = ensureRadarParamsDialog();
+  const rp = getEffectiveRadarParams(ds);
+  const hs = ds.meta?.headerSuggestions || {};
+  $("#radar-param-fields").innerHTML = radarParamFields.map(([id, label]) => {
+    const value = rp[id] ?? "";
+    const text = value === "" || !Number.isFinite(Number(value)) ? "" : Number(value).toString();
+    return `<label>${label}<input data-radar-param="${id}" value="${text}"></label>`;
+  }).join("");
+  $("#radar-param-vofh").value = rp.vofhText || `${rp.velocityMPerNs},0`;
+  $("#radar-param-suggestions").innerHTML = Object.entries(hs).map(([k, v]) => `<div><span>${escapeHtml(k)}</span><b>${escapeHtml(formatSuggestionValue(v))}</b></div>`).join("") || "暂无文件头建议";
+  dlg.onclose = () => {
+    if (dlg.returnValue !== "default") return;
+    const values = {};
+    $$("[data-radar-param]").forEach(input => {
+      const key = input.dataset.radarParam;
+      values[key] = input.value.trim() === "" ? "" : Number(input.value);
+    });
+    const velocity = finiteNumber(values.velocityMPerNs, velocityFromEps(values.epsilonR, 0.1));
+    const radarParams = {
+      ...rp,
+      ...values,
+      dtNs: finiteNumber(values.dtNs, rp.dtNs),
+      dxM: finiteNumber(values.dxM, rp.dxM),
+      velocityMPerNs: velocity,
+      epsilonR: finiteNumber(values.epsilonR, epsFromVelocity(velocity)),
+      vofhText: $("#radar-param-vofh").value.trim() || `${velocity},0`,
+      antennaFreqMHz: Number.isFinite(Number(values.antennaFreqMHz)) ? Number(values.antennaFreqMHz) : "",
+      q: values.q === "" || values.q == null ? "" : (Number.isFinite(Number(values.q)) ? Number(values.q) : ""),
+      timeZeroSample: Number.isFinite(Number(values.timeZeroSample)) ? Number(values.timeZeroSample) : 0,
+      depthDzM: finiteNumber(values.depthDzM, rp.depthDzM),
+      depthMaxM: finiteNumber(values.depthMaxM, rp.depthMaxM)
+    };
+    const updated = buildRadarMetadata({ ...ds, meta: { ...(ds.meta || {}), radarParams } });
+    currentVofhText = updated.meta.radarParams.vofhText;
+    store.updateCurrentMeta(updated.meta);
+    syncGeoControlsFromDataset(true);
+    syncExportControls();
+    applyDepthAxisMode();
+    toast("雷达参数已保存到当前数据集");
+  };
   dlg.showModal();
 }
 
@@ -452,8 +689,9 @@ function openFkDesigner() {
   if (!ds) return toast("请先导入数据", "warn");
   const dlg = ensureFkDialog();
   const cv = $("#fk-canvas");
-  const dt = ds.meta?.dtNs || ds.dtNs || 0.625;
-  const dx = ds.meta?.dxM || ds.dxM || 0.05;
+  const rp = getEffectiveRadarParams(ds);
+  const dt = rp.dtNs;
+  const dx = rp.dxM;
   $("#fk-dt").value = dt;
   $("#fk-dx").value = dx;
   let spec = null;
@@ -600,12 +838,14 @@ function switchPage(name) {
   $$(".page").forEach(p => p.classList.remove("active"));
   $(`#page-${name}`)?.classList.add("active");
   if (name === "data-manager") renderDataManager();
+  if (name === "export") syncExportControls();
   if (name === "velocity") renderVelocity();
   if (name === "model") renderModel();
   if (name === "three") renderThree();
-  if (name === "interpret" || name === "geo-modeling") {
+  if (name === "interpret" || name === "geo-modeling" || name === "manual-geo") {
     syncGeoControlsFromDataset();
     drawGeologyResult();
+    if (name === "manual-geo") drawManualGeoResult();
   }
 }
 
@@ -650,6 +890,10 @@ function drawSpectrum(mean = false) {
 function renderVelocity() {
   const ds = currentDisplayed(), cv = $("#velocity-canvas");
   if (!ds) return;
+  const rp = getEffectiveRadarParams(ds);
+  if ($("#vel-dt")) $("#vel-dt").value = rp.dtNs.toFixed(4);
+  if ($("#vel-dx")) $("#vel-dx").value = rp.dxM.toFixed(4);
+  if ($("#vel-v")) $("#vel-v").value = rp.velocityMPerNs.toFixed(3);
   if (!velocityRenderer || velocityRenderer.canvas !== cv) velocityRenderer = new RadarRenderer(cv, cv.parentElement);
   const rr = velocityRenderer;
   rr.setDataset(ds);
@@ -799,12 +1043,14 @@ function clearInteractionState() {
   lastMergedSelection = null;
   geologyResult = null;
   geologyPipelineState = {};
+  activeManualGeoOp = "";
+  manualGeoResult = null;
   radar.setSelections([]);
   radar.setAnnotations([]);
   updateSelectionPanel();
   updateAnnotationPanel();
   if ($("#geo-report")) $("#geo-report").innerHTML = "尚未生成自动地质模型。";
-  if ($("#geo-pipeline-report")) $("#geo-pipeline-report").innerHTML = "手动流水线尚未运行。";
+  if ($("#manual-geo-report")) $("#manual-geo-report").innerHTML = "手动流水线尚未运行。";
   updateGeoPipelineButtons();
 }
 function toggleFloat(id) {
@@ -899,10 +1145,22 @@ function exportManagedDataset(id) {
   download(write2BFile(item), dataFileName(item.name));
   toast("导出完成");
 }
+function radarParamSignature(ds) {
+  const rp = getEffectiveRadarParams(ds);
+  return [
+    ds.meta?.sourceFormat || ds.sourceFormat || "data",
+    rp.dtNs.toFixed(6),
+    rp.dxM.toFixed(6),
+    rp.velocityMPerNs.toFixed(6),
+    rp.vofhText
+  ].join("|");
+}
 function mergeSelectedManagedDatasets() {
   const selected = (store.managedDatasets || []).filter(item => dataManagerSelection.has(item.id));
   if (selected.length < 2) return toast("请至少选择两个 .2B 数据集", "warn");
   if (selected.some(item => item.numSamples !== SAMPLES_PER_TRACE)) return toast("只能合并每道 2048 样点的 .2B 数据集", "warn");
+  const signature = radarParamSignature(selected[0]);
+  if (selected.some(item => radarParamSignature(item) !== signature)) return toast("所选数据的格式或雷达参数不一致，请先统一 dt/dx/速度模型后再合并", "warn");
   const merged = merge2BDatasets(selected);
   download(write2BFile(merged), merged.name);
   toast(`已合并导出 ${selected.length} 个数据集，共 ${merged.numTraces} 道`);
@@ -925,7 +1183,13 @@ function merge2BDatasets(datasets) {
   };
 }
 function mergeMetaArrays(datasets, numTraces) {
-  const out = { sourceFormat: ".2B" };
+  const base = datasets[0]?.meta || {};
+  const out = {
+    ...base,
+    sourceFormat: ".2B",
+    radarParams: base.radarParams ? { ...base.radarParams } : undefined,
+    headerSuggestions: base.headerSuggestions ? { ...base.headerSuggestions, mergedFrom: datasets.length } : { mergedFrom: datasets.length }
+  };
   const keys = ["antennaId","timestamp","velocity","posX","posY","posZ","attX","attY","attZ","validLen","quality"];
   for (const key of keys) {
     const first = datasets.find(ds => ds.meta?.[key])?.meta?.[key];
@@ -943,7 +1207,11 @@ function mergeMetaArrays(datasets, numTraces) {
 }
 function copyMeta(meta, indices) {
   if (!meta) return null;
-  const out = {};
+  const out = {
+    ...meta,
+    radarParams: meta.radarParams ? { ...meta.radarParams } : undefined,
+    headerSuggestions: meta.headerSuggestions ? { ...meta.headerSuggestions } : undefined
+  };
   const keys = ["antennaId","timestamp","velocity","posX","posY","posZ","attX","attY","attZ","validLen","quality"];
   for (const key of keys) {
     if (!meta[key]) continue;
@@ -1073,6 +1341,36 @@ function renderDatasetCanvas(canvas, ds, opts = {}) {
     });
     ctx.setLineDash([]);
   }
+  if (opts.clusters?.length) {
+    ctx.save();
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = "#63e6be";
+    ctx.setLineDash([7, 5]);
+    const depthMax = opts.depthMax || opts.modelDepthMax || displaySamples;
+    for (const c of opts.clusters) {
+      const depth = Number(c.depth ?? c.meanDepth ?? c.medianDepth);
+      if (!Number.isFinite(depth)) continue;
+      const y = depth / Math.max(depthMax, 1e-9) * h;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  if (opts.peaks?.length) {
+    ctx.save();
+    ctx.fillStyle = "#fff200";
+    ctx.strokeStyle = "rgba(2,8,18,.85)";
+    const depthMax = opts.depthMax || opts.modelDepthMax || displaySamples;
+    const step = opts.depthStep || (depthMax / Math.max(1, displaySamples));
+    const stride = Math.max(1, Math.ceil(opts.peaks.length / 2500));
+    for (let i = 0; i < opts.peaks.length; i += stride) {
+      const p = opts.peaks[i];
+      const x = (Number(p.t) || 0) / Math.max(1, ds.numTraces - 1) * w;
+      const depth = Number.isFinite(Number(p.depth)) ? Number(p.depth) : (Number(p.sample) || 0) * step;
+      const y = depth / Math.max(depthMax, 1e-9) * h;
+      ctx.beginPath(); ctx.arc(x, y, 2.1, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
   if (opts.axes) {
     const depthMax = opts.depthMax || opts.modelDepthMax || displaySamples;
     const traceMax = Math.max(0, (ds.numTraces || 1) - 1);
@@ -1176,15 +1474,19 @@ async function runGeologyModel() {
 }
 
 function collectGeoParams(ds = currentDisplayed()) {
-  const velocity = finiteNumber($("#geo-velocity")?.value, 0.1);
-  const dt = finiteNumber($("#geo-dt")?.value, datasetDtNs(ds));
-  const dx = finiteNumber($("#geo-dx")?.value, datasetDxM(ds));
+  const rp = getEffectiveRadarParams(ds);
+  const velocity = finiteNumber($("#geo-velocity")?.value, rp.velocityMPerNs);
+  const dt = finiteNumber($("#geo-dt")?.value, rp.dtNs);
+  const dx = finiteNumber($("#geo-dx")?.value, rp.dxM);
   return {
     velocity,
     dt,
     dx,
-    loMHz: Number($("#geo-lo")?.value || 20),
-    hiMHz: Number($("#geo-hi")?.value || 900),
+    vofh: rp.vofhText,
+    dzM: rp.depthDzM,
+    zMaxM: rp.depthMaxM,
+    loMHz: Number($("#geo-lo")?.value || rp.freqLowMHz),
+    hiMHz: Number($("#geo-hi")?.value || rp.freqHighMHz),
     bgWidth: Number($("#geo-bg")?.value || 25),
     agcWindow: Number($("#geo-agc")?.value || 80),
     modelDepthMax: finiteNumber($("#geo-depth")?.value, inferredDepthMax(ds, dt, velocity)),
@@ -1210,8 +1512,9 @@ async function runGeoPipelineStep(op) {
   try {
     const result = await runWorker(op, ds, params);
     geologyPipelineState[op] = result;
+    activeManualGeoOp = op;
     updateGeoPipelineButtons(op);
-    if (op === "geo-classify-model") geologyResult = {
+    if (op === "geo-classify-model") manualGeoResult = {
       ...result,
       numTraces: result.numTraces,
       numSamples: result.numSamples,
@@ -1229,18 +1532,22 @@ async function runGeoPipelineStep(op) {
 function drawGeoPipelineResult(op, result, def) {
   if (!result) return;
   const preview = { data: result.data, numTraces: result.numTraces, numSamples: result.numSamples };
-  renderDatasetCanvas($("#geo-radar-canvas"), preview, {
+  renderDatasetCanvas($("#manual-geo-radar-canvas"), preview, {
     cmap: "seismic",
     min: -2.2,
     max: 2.2,
     horizons: result.horizons || [],
+    peaks: result.peaks || [],
+    clusters: result.seeds || result.mergedClusters || result.clusters || [],
     modelDepthMax: result.modelDepthMax || 24,
     depthMax: result.modelDepthMax || 24,
+    depthStep: result.depthStep,
     distanceStep: result.distanceStep || result.dx,
     axes: true,
     sampleMax: result.depthStep ? Math.ceil((result.modelDepthMax || 24) / result.depthStep) : result.numSamples
   });
-  if (result.modelData) drawLayerModelCanvas($("#geo-model-canvas"), result);
+  drawManualHistogram(result);
+  if (result.modelData) drawLayerModelCanvas($("#manual-geo-model-canvas"), result);
   const details = [];
   if (result.peaks) details.push(`峰值 ${result.peaks.length} 个`);
   if (result.clusters) details.push(`聚类 ${result.clusters.length} 个`);
@@ -1248,7 +1555,7 @@ function drawGeoPipelineResult(op, result, def) {
   if (result.seeds) details.push(`候选层位 ${result.seeds.length} 个`);
   if (result.horizons) details.push(`层位线 ${result.horizons.length} 条`);
   if (result.modelData) details.push(`模型 ${result.modelTraces} 道 × ${result.modelSamples} 深度格`);
-  $("#geo-pipeline-report").innerHTML = `<b>${def?.[1] || op}</b><p>${def?.[2] || ""}</p><p>${details.join("；") || "已生成预览数据。"}</p><p class="muted">手动运行时会按该步骤自动补齐前置计算；建议仍按编号顺序检查结果。</p>`;
+  $("#manual-geo-report").innerHTML = `<b>${def?.[1] || op}</b><p>${def?.[2] || ""}</p><p>${details.join("；") || "已生成预览数据。"}</p><p class="muted">每步会自动补齐前置计算；当前结果只保存在手动流水线状态中，点击保存才写入 Output Data。</p>`;
 }
 function updateGeoPipelineButtons(activeOp = "") {
   $$("[data-geo-step]").forEach(btn => {
@@ -1256,6 +1563,66 @@ function updateGeoPipelineButtons(activeOp = "") {
     btn.classList.toggle("completed", !!geologyPipelineState[op]);
     btn.classList.toggle("active", op === activeOp);
   });
+}
+
+function drawManualGeoResult() {
+  if (!activeManualGeoOp) return;
+  const def = geoPipelineDefs.find(x => x[0] === activeManualGeoOp);
+  const result = geologyPipelineState[activeManualGeoOp];
+  if (result) drawGeoPipelineResult(activeManualGeoOp, result, def);
+}
+
+function drawManualHistogram(result) {
+  const canvas = $("#manual-geo-chart-canvas");
+  if (!canvas) return;
+  const rect = canvas.parentElement?.getBoundingClientRect?.() || { width: 900, height: 180 };
+  const dpr = devicePixelRatio || 1, w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
+  canvas.width = w * dpr; canvas.height = h * dpr; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
+  const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#080c14"; ctx.fillRect(0, 0, w, h);
+  if (!result.histogram?.length) {
+    ctx.fillStyle = "#91a7c7"; ctx.font = "12px Consolas"; ctx.fillText("Histogram appears after depth histogram / clustering steps.", 14, 24);
+    return;
+  }
+  const hist = result.histogram;
+  const max = Math.max(...hist) || 1;
+  const m = { l: 54, r: 12, t: 14, b: 28 };
+  ctx.strokeStyle = "rgba(248,252,255,.45)";
+  ctx.fillStyle = "#f8fcff";
+  ctx.font = "11px Consolas";
+  ctx.strokeRect(m.l, m.t, w - m.l - m.r, h - m.t - m.b);
+  for (let i = 0; i < hist.length; i++) {
+    const x0 = m.l + i / hist.length * (w - m.l - m.r);
+    const x1 = m.l + (i + 1) / hist.length * (w - m.l - m.r);
+    const bh = hist[i] / max * (h - m.t - m.b);
+    ctx.fillStyle = "#74c0fc";
+    ctx.fillRect(x0 + 1, h - m.b - bh, Math.max(1, x1 - x0 - 2), bh);
+  }
+  ctx.fillStyle = "#f8fcff";
+  ctx.textAlign = "center";
+  ctx.fillText("Depth histogram", w / 2, h - 8);
+  ctx.textAlign = "right";
+  ctx.fillText(max.toFixed(1), m.l - 6, m.t + 10);
+}
+
+function saveManualGeoOutput() {
+  const result = activeManualGeoOp ? geologyPipelineState[activeManualGeoOp] : manualGeoResult;
+  if (!result) return toast("请先运行手动地质流水线步骤", "warn");
+  const ds = currentDisplayed();
+  store.setOutput({
+    data: result.data,
+    numTraces: result.numTraces,
+    numSamples: result.numSamples,
+    name: `${ds?.name || "data"}_${activeManualGeoOp || "manual_geo"}`,
+    meta: result.meta || ds?.meta,
+    dtNs: result.dtNs,
+    dxM: result.dxM,
+    depthStep: result.depthStep,
+    depthAxisM: result.meta?.depthAxisM
+  }, { name: "手动地质流水线", op: activeManualGeoOp || "manual-geo", params: collectGeoParams(ds) });
+  displaySource = "output";
+  $("#display-mode").value = "output";
+  toast("手动流水线当前步骤已保存到 Output Data");
 }
 function drawGeologyResult() {
   if (!geologyResult) return;
@@ -1480,15 +1847,25 @@ function exportGeoImage(format, showLines, title) {
   }
 }
 
+function syncExportControls(ds = currentDisplayed()) {
+  if (!ds) return;
+  const rp = getEffectiveRadarParams(ds);
+  if ($("#export-dt")) $("#export-dt").value = (rp.dtNs / 1000).toFixed(6);
+  if ($("#export-dzt-dt")) $("#export-dzt-dt").value = rp.dtNs.toFixed(4);
+  if ($("#export-dx")) $("#export-dx").value = rp.dxM.toFixed(4);
+  if ($("#export-range")) $("#export-range").value = (ds.numSamples * rp.dtNs).toFixed(2);
+}
+
 function exportData(kind) {
   const ds = $("#export-source").value === "output" && store.output ? store.output : store.current;
   if (!ds) return toast("无可导出数据", "warn");
+  const rp = getEffectiveRadarParams(ds);
   try {
     if (kind === "2b") download(write2BFile(ds), dataFileName(ds.name));
     else if (kind === "mgp") download(writeMgpJson(store.ipd), `${store.ipd.name}.mgp.json`);
     else if (kind === "depth") download(writeMgpJson({ ...store.ipd, current: ds }), `${store.ipd.name}_depth.json`);
-    else if (kind === "segy") download(writeSEGYFile(ds, Number($("#export-dt")?.value || 0.001), Number($("#export-dx")?.value || 0.05)), `${(ds.name || "data").replace(/\.\w+$/i, "")}.sgy`);
-    else if (kind === "dzt") download(writeDZTFile(ds, Number($("#export-dzt-dt")?.value || 0.625), Number($("#export-dx")?.value || 0.05), Number($("#export-range")?.value || ds.numSamples * 0.625)), `${(ds.name || "data").replace(/\.\w+$/i, "")}.dzt`);
+    else if (kind === "segy") download(writeSEGYFile(ds, Number($("#export-dt")?.value || rp.dtNs / 1000), Number($("#export-dx")?.value || rp.dxM)), `${(ds.name || "data").replace(/\.\w+$/i, "")}.sgy`);
+    else if (kind === "dzt") download(writeDZTFile(ds, Number($("#export-dzt-dt")?.value || rp.dtNs), Number($("#export-dx")?.value || rp.dxM), Number($("#export-range")?.value || ds.numSamples * rp.dtNs)), `${(ds.name || "data").replace(/\.\w+$/i, "")}.dzt`);
     else if (kind === "su") download(writeSEGYLike(ds, "su"), `${ds.name || "data"}.su`);
     else if (kind === "csv") download(exportCsv(ds), `${(ds.name || "data").replace(/\.\w+$/i, "")}.csv`);
     else if (kind === "bin") download(new Blob([ds.data.buffer], { type: "application/octet-stream" }), `${(ds.name || "data").replace(/\.\w+$/i, "")}.bin`);
@@ -1536,11 +1913,13 @@ function bindUi() {
     if (action === "data-merge-export") mergeSelectedManagedDatasets();
     if (action === "data-delete-selected") deleteSelectedManagedDatasets();
     if (action === "data-clear-selection") { dataManagerSelection.clear(); renderDataManager(); }
+    if (action === "open-radar-params") openRadarParamsDialog();
     if (action === "annotation-export") download(new Blob([JSON.stringify(radarAnnotations, null, 2)], { type: "application/json" }), "annotations.json");
     if (action === "annotation-clear") { radarAnnotations = []; updateAnnotationPanel(); }
     if (action === "run-geology") runGeologyModel();
     if (action === "export-geology") exportGeologyJson();
     if (action === "export-geo-image") openGeoExport();
+    if (action === "manual-geo-save") saveManualGeoOutput();
     if (action === "open-trace") openFloat("trace-window");
     if (action === "open-spectrum") openFloat("spectrum-window");
     if (action === "hold-output") store.holdOutput() ? toast("Output Data 已接受为 Current Input Data") : toast("没有 Output Data", "warn");
@@ -1562,7 +1941,8 @@ function bindUi() {
     if (e.target.dataset.close) $(`#${e.target.dataset.close}`).classList.remove("show");
     if (e.target.dataset.modelTool) { modelTool = e.target.dataset.modelTool; toast(`建模工具：${modelTool}`); }
   });
-  $("#display-mode").onchange = e => { displaySource = e.target.value; refresh(); };
+  $("#display-mode").onchange = e => { displaySource = e.target.value; refresh(); syncExportControls(); };
+  $("#export-source") && ($("#export-source").onchange = () => syncExportControls());
   $("#geo-dt")?.addEventListener("input", () => updateGeoDepthFromControls());
   $("#geo-velocity")?.addEventListener("input", () => updateGeoDepthFromControls());
   $("#geo-depth")?.addEventListener("input", () => { $("#geo-depth").dataset.manual = "true"; });
