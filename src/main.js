@@ -860,6 +860,7 @@ function openFloat(id) {
   el.classList.add("show");
   if (id === "trace-window") drawTrace();
   if (id === "spectrum-window") drawSpectrum();
+  if (id === "manual-model-window") drawManualModelWindow();
 }
 function syncTraceIndex(t, redraw = true) {
   $("#trace-index").value = t; $("#spectrum-index").value = t; radar.setCurrentTrace(t);
@@ -1855,10 +1856,15 @@ function manualDepthStep(ds = currentDisplayed()) {
   return Math.max(1e-9, rp.dtNs * rp.velocityMPerNs / 2);
 }
 
-function manualSampleMax(ds = currentDisplayed()) {
+function manualProfileDepthMax(ds = currentDisplayed()) {
   const rp = getEffectiveRadarParams(ds);
-  const depth = finiteNumber($("#geo-depth")?.value, rp.depthMaxM);
-  return Math.max(1, Math.min(ds?.numSamples || 1, Math.ceil(depth / manualDepthStep(ds))));
+  const computed = Math.max(0, (ds?.numSamples || 1) - 1) * manualDepthStep(ds);
+  return finiteNumber(rp.depthMaxM, computed);
+}
+
+function manualSampleMax(ds = currentDisplayed()) {
+  const depth = manualProfileDepthMax(ds);
+  return Math.max(1, Math.min(Math.max(1, (ds?.numSamples || 1) - 1), Math.ceil(depth / manualDepthStep(ds))));
 }
 
 function enrichManualPoint(point, ds = currentDisplayed()) {
@@ -2105,7 +2111,7 @@ function drawManualWorkbench() {
     traceEnd: view.traceEnd,
     sampleStart: view.sampleStart,
     sampleEnd: view.sampleEnd,
-    depthMax: manualSampleMax(ds) * manualDepthStep(ds),
+    depthMax: manualProfileDepthMax(ds),
     sampleMax: manualSampleMax(ds),
     distanceStep: rp.dxM,
     horizons: mode === "auto" ? geologyResult?.horizons || [] : []
@@ -2114,6 +2120,9 @@ function drawManualWorkbench() {
   renderManualLayerList();
   drawManualTraceAndSpectrum(st.cursorTrace || 0);
   if (manualModelResult) drawLayerModelCanvas($("#manual-geo-model-canvas"), manualModelResult);
+  drawManualModelWindow();
+  const depthStatus = $("#manual-depth-status");
+  if (depthStatus) depthStatus.textContent = `Depth max ${manualProfileDepthMax(ds).toFixed(2)} m · dt ${rp.dtNs.toFixed(4)} ns · v ${rp.velocityMPerNs.toFixed(3)} m/ns`;
   syncManualViewControls(view);
 }
 
@@ -2256,7 +2265,7 @@ function generateManualModel() {
   const usable = st.layers.filter(l => l.visible && l.points.length >= 2);
   if (!usable.length) return toast("请先手动画出至少一条层位线", "warn");
   const horizons = usable.map(l => lineFromManualLayer(l, ds)).sort((a, b) => a.medianDepth - b.medianDepth);
-  const rp = getEffectiveRadarParams(ds), modelSamples = 480, depthMax = finiteNumber($("#geo-depth")?.value, rp.depthMaxM);
+  const rp = getEffectiveRadarParams(ds), modelSamples = 480, depthMax = manualProfileDepthMax(ds);
   const modelData = new Uint8Array(modelSamples * ds.numTraces), uncertaintyData = new Uint8Array(modelSamples * ds.numTraces);
   for (let z = 0; z < modelSamples; z++) {
     const depth = z / Math.max(1, modelSamples - 1) * depthMax;
@@ -2273,6 +2282,7 @@ function generateManualModel() {
   }
   manualModelResult = { data: ds.data, numTraces: ds.numTraces, numSamples: ds.numSamples, modelData, uncertaintyData, modelTraces: ds.numTraces, modelSamples, modelDepthMax: depthMax, depthStep: depthMax / Math.max(1, modelSamples - 1), distanceStep: rp.dxM, velocity: rp.velocityMPerNs, epsilonR: rp.epsilonR, horizons, layerNames: GEO_LABELS_SAFE, source: "manual" };
   drawManualWorkbench();
+  drawManualModelWindow();
   $("#manual-geo-report").innerHTML = `<b>Manual model generated 手动模型已生成</b><p>${horizons.length} 条人工层位；人工线优先，短缺口已插值，长缺口标为未解释。</p>`;
   toast("手动地质模型已生成");
 }
@@ -2298,6 +2308,31 @@ function saveManualGeoOutput() {
   displaySource = "output";
   $("#display-mode").value = "output";
   toast("手动地质模型已保存到 Output Data");
+}
+
+function drawManualModelWindow() {
+  const win = $("#manual-model-window"), canvas = $("#manual-model-window-canvas"), status = $("#manual-model-window-status");
+  if (!win || !canvas || !win.classList.contains("show")) return;
+  if (!manualModelResult) {
+    if (status) status.textContent = "请先点击 Generate Manual Model 生成手动模型。";
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect?.() || { width: 600, height: 360 };
+    const w = Math.max(1, Math.floor(rect.width || 600)), h = Math.max(1, Math.floor(rect.height || 360));
+    canvas.width = w; canvas.height = h; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
+    ctx.fillStyle = "#080c14"; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#91a7c7"; ctx.font = "13px Consolas"; ctx.fillText("Generate a manual model first.", 18, 30);
+    return;
+  }
+  const ds = currentDisplayed();
+  if (status) status.textContent = `Depth max ${manualModelResult.modelDepthMax.toFixed(2)} m · ${manualModelResult.modelTraces} traces · based on current radar parameters`;
+  const rect = canvas.getBoundingClientRect?.() || { width: 720, height: 420 };
+  drawLayerModelCanvas(canvas, manualModelResult, { width: rect.width || 720, height: rect.height || 420 });
+}
+
+function openManualModelWindow() {
+  openFloat("manual-model-window");
+  if (!manualModelResult) toast("请先生成手动模型；窗口已打开用于预览。", "warn");
+  drawManualModelWindow();
 }
 
 function manualReportPayload() {
@@ -2737,6 +2772,7 @@ function bindUi() {
     if (action === "manual-auto-range") setManualAutoRange();
     if (action === "manual-reset-view") resetManualView();
     if (action === "manual-export-report") openManualExport();
+    if (action === "manual-open-model-window") openManualModelWindow();
     if (action === "open-trace") openFloat("trace-window");
     if (action === "open-spectrum") openFloat("spectrum-window");
     if (action === "hold-output") store.holdOutput() ? toast("Output Data 已接受为 Current Input Data") : toast("没有 Output Data", "warn");
@@ -2776,7 +2812,8 @@ function bindUi() {
   $("#spectrum-mean").onclick = () => drawSpectrum(true);
   bindLongPress("[data-trace-step]", btn => moveTrace(Number(btn.dataset.traceStep)));
   bindLongPress("[data-spectrum-step]", btn => { $("#spectrum-index").value = Math.max(0, Number($("#spectrum-index").value) + Number(btn.dataset.spectrumStep)); drawSpectrum(); radar.setCurrentTrace(Number($("#spectrum-index").value)); });
-  makeDraggable($("#trace-window")); makeDraggable($("#spectrum-window")); makeDraggable($("#selection-window")); makeDraggable($("#annotation-window")); makeDraggable($("#toolbar-process-window"));
+  makeDraggable($("#trace-window")); makeDraggable($("#spectrum-window")); makeDraggable($("#selection-window")); makeDraggable($("#annotation-window")); makeDraggable($("#toolbar-process-window")); makeDraggable($("#manual-model-window"));
+  if (window.ResizeObserver && $("#manual-model-window")) new ResizeObserver(() => drawManualModelWindow()).observe($("#manual-model-window"));
   $("#save-velocity").onclick = () => {
     const p = { v: Number($("#vel-v").value), x0: Number($("#vel-x0").value), z0: Number($("#vel-z0").value) };
     velocityPoints.push(p); updateVelocityList(); toast("速度点已保存");

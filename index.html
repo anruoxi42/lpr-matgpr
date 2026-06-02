@@ -480,6 +480,8 @@
             <button data-action="manual-generate-model" class="primary">Generate Manual Model 生成手动模型</button>
             <button data-action="manual-geo-save">Save Model to Output 保存模型</button>
             <button data-action="manual-export-report">Export Interpretation Report 导出解释报告</button>
+            <button data-action="manual-open-model-window">Show Geologic Layers 显示地质分层图</button>
+            <span id="manual-depth-status" class="muted">Depth follows current radar parameters.</span>
           </div>
           <div class="manual-geo-view">
             <div class="manual-geo-main">
@@ -553,6 +555,14 @@
       <span id="spectrum-stats"></span>
     </div>
     <canvas id="spectrum-canvas"></canvas>
+  </div>
+
+  <div id="manual-model-window" class="float-window manual-model-window">
+    <div class="float-head"><span>Geologic Layers 地质分层图</span><button data-close="manual-model-window">×</button></div>
+    <div class="viewer-controls">
+      <span id="manual-model-window-status">Generate a manual model first.</span>
+    </div>
+    <canvas id="manual-model-window-canvas"></canvas>
   </div>
 
   <dialog id="process-dialog">
