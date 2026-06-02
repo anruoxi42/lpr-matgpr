@@ -389,6 +389,36 @@
             <button data-action="export-geology">导出地质模型 JSON</button>
             <button data-action="export-geo-image">导出图像</button>
           </div>
+          <div class="geo-pipeline">
+            <h3>Automatic Process 自动全过程</h3>
+            <div class="geo-step-grid">
+              <button data-geo-step="geo-energy-envelope">1. Hilbert 多属性包络</button>
+              <button data-geo-step="geo-smooth-2d">2. 二维/边缘保持平滑</button>
+              <button data-geo-step="geo-trace-peaks">3. 逐道候选峰检测</button>
+              <button data-geo-step="geo-depth-histogram">4. 深度/倾角候选统计</button>
+              <button data-geo-step="geo-cluster-peaks">5. 二维事件聚类</button>
+              <button data-geo-step="geo-merge-clusters">6. 事件聚类合并</button>
+              <button data-geo-step="geo-support-select">7. 综合支持度筛选</button>
+              <button data-geo-step="geo-track-horizons">8. Viterbi 层位追踪</button>
+              <button data-geo-step="geo-line-smooth">9. 置信度加权线平滑</button>
+              <button data-geo-step="geo-stratigraphy">10. 地层顺序约束</button>
+              <button data-geo-step="geo-classify-model">11. 地层分类模型生成</button>
+            </div>
+            <div class="geo-process-grid">
+              <div>
+                <h3>Step preview 步骤预览</h3>
+                <div class="geo-canvas-wrap"><canvas id="geo-step-canvas"></canvas></div>
+              </div>
+              <div>
+                <h3>Step model / histogram 模型或统计</h3>
+                <div class="geo-step-side">
+                  <div class="geo-step-chart-wrap"><canvas id="geo-step-chart-canvas"></canvas></div>
+                  <div class="geo-step-model-wrap"><canvas id="geo-step-model-canvas"></canvas></div>
+                </div>
+              </div>
+            </div>
+            <div id="geo-step-report" class="list muted">点击上方步骤可查看自动建模全过程。</div>
+          </div>
           <div class="geo-canvas-grid">
             <div>
               <h3>处理后雷达剖面与自动界面</h3>
@@ -418,6 +448,20 @@
                 <option value="auto">Auto horizons 自动层位</option>
               </select>
             </label>
+            <label>cmap 色标
+              <select id="manual-cmap">
+                <option value="seismic">seismic</option>
+                <option value="gray">gray</option>
+                <option value="jet">jet</option>
+                <option value="hot">hot</option>
+                <option value="cool">cool</option>
+                <option value="viridis-like">viridis-like</option>
+              </select>
+            </label>
+            <label>min 最小<input id="manual-min" type="number" value="-10" step="0.1"></label>
+            <label>max 最大<input id="manual-max" type="number" value="10" step="0.1"></label>
+            <button data-action="manual-auto-range">Auto Range 自动范围</button>
+            <button data-action="manual-reset-view">Reset View 重置视窗</button>
             <button data-manual-tool="draw" class="active">Draw 画笔</button>
             <button data-manual-tool="polyline">Polyline 折线</button>
             <button data-manual-tool="drag">Edit 编辑</button>
@@ -435,6 +479,7 @@
             <button data-action="manual-redo">Redo 重做</button>
             <button data-action="manual-generate-model" class="primary">Generate Manual Model 生成手动模型</button>
             <button data-action="manual-geo-save">Save Model to Output 保存模型</button>
+            <button data-action="manual-export-report">Export Interpretation Report 导出解释报告</button>
           </div>
           <div class="manual-geo-view">
             <div class="manual-geo-main">

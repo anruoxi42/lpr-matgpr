@@ -17,13 +17,13 @@ let radarAnnotations = [];
 let lastMergedSelection = null;
 let geologyResult = null;
 let geologyPipelineState = {};
-let activeManualGeoOp = "";
-let manualGeoResult = null;
+let activeGeoPipelineOp = "";
 let manualInterpretationState = null;
 let manualGeoTool = "draw";
 let manualGeoDrag = null;
 let manualFeatureResult = null;
 let manualModelResult = null;
+let manualCanvasRender = null;
 let dataManagerSelection = new Set();
 let velocityRenderer = null;
 let velocityPreviewPoint = null;
@@ -33,17 +33,17 @@ let currentVofhText = "0.1,0";
 let lastGeoDatasetKey = "";
 
 const geoPipelineDefs = [
-  ["geo-energy-envelope", "能量包络", "计算反射振幅绝对值，突出强反射界面。"],
-  ["geo-smooth-2d", "二维平滑", "沿时间和道向平滑能量图，降低孤立噪声。"],
-  ["geo-trace-peaks", "逐道峰值检测", "在每道内寻找候选反射峰，并按最小间距筛选。"],
-  ["geo-depth-histogram", "深度直方图聚类", "统计峰值深度分布，寻找全剖面稳定深度带。"],
-  ["geo-cluster-peaks", "聚类生成", "围绕直方图峰值聚合反射点，估计候选层位中心。"],
-  ["geo-merge-clusters", "聚类合并", "合并距离很近的候选层，避免重复层位。"],
-  ["geo-support-select", "支持度筛选", "保留横向支持度足够的候选层位。"],
-  ["geo-track-horizons", "层位追踪", "围绕候选深度逐道搜索能量最大点生成层位线。"],
-  ["geo-line-smooth", "线平滑", "平滑层位线，减少锯齿和局部跳变。"],
-  ["geo-stratigraphy", "层序约束", "强制深层界面位于浅层界面之下，保持地层顺序。"],
-  ["geo-classify-model", "地层分类模型", "根据层位线把剖面划分为分层地质模型。"]
+  ["geo-energy-envelope", "Hilbert 多属性包络", "计算包络、相位、瞬时频率、相干性等界面识别属性。"],
+  ["geo-smooth-2d", "二维/边缘保持平滑", "增强连续同相轴并降低孤立噪声。"],
+  ["geo-trace-peaks", "逐道候选峰检测", "按深度归一和最小波长约束提取候选反射点。"],
+  ["geo-depth-histogram", "深度/倾角候选统计", "统计候选界面的深度分布和连续性趋势。"],
+  ["geo-cluster-peaks", "二维事件聚类", "将候选点按深度、倾角和横向连续性聚为事件。"],
+  ["geo-merge-clusters", "事件聚类合并", "合并相近或重复的候选界面事件。"],
+  ["geo-support-select", "综合支持度筛选", "按覆盖率、SNR、相干性和连续段长度筛选候选层位。"],
+  ["geo-track-horizons", "Viterbi 层位追踪", "用全局代价追踪连续层位，降低逐道跳层风险。"],
+  ["geo-line-smooth", "置信度加权线平滑", "在保留可信局部变化的同时平滑层位线。"],
+  ["geo-stratigraphy", "地层顺序约束", "约束层位不交叉，并允许缺失段和尖灭。"],
+  ["geo-classify-model", "地层分类模型生成", "根据层位线生成地质分层模型和不确定性图。"]
 ];
 
 const algorithmDocs = [
@@ -850,6 +850,7 @@ function switchPage(name) {
   if (name === "interpret" || name === "geo-modeling" || name === "manual-geo") {
     syncGeoControlsFromDataset();
     drawGeologyResult();
+    if (name === "geo-modeling") drawManualGeoResult();
     if (name === "manual-geo") { ensureManualState(); drawManualWorkbench(); }
   }
 }
@@ -1048,8 +1049,7 @@ function clearInteractionState() {
   lastMergedSelection = null;
   geologyResult = null;
   geologyPipelineState = {};
-  activeManualGeoOp = "";
-  manualGeoResult = null;
+  activeGeoPipelineOp = "";
   manualInterpretationState = null;
   manualFeatureResult = null;
   manualModelResult = null;
@@ -1312,111 +1312,281 @@ function colorOf(cmap, t) {
   if (cmap === "gray") { const v = Math.round(t * 255); return [v, v, v]; }
   if (cmap === "seismic") return t < .5 ? [0, 0, Math.round(t * 510)] : [Math.round((t - .5) * 510), 0, Math.round((1 - (t - .5) * 2) * 255)];
   if (cmap === "hot") return [Math.min(255, Math.round(t * 765)), Math.min(255, Math.round(Math.max(0, t * 3 - 1) * 255)), Math.min(255, Math.round(Math.max(0, t * 3 - 2) * 255))];
+  if (cmap === "cool") return [Math.round(t * 255), Math.round((1 - t) * 255), 255];
+  if (cmap === "viridis-like") {
+    const stops = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
+    const pos = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(pos)), f = pos - i;
+    return stops[i].map((v, c) => Math.round(v + (stops[i + 1][c] - v) * f));
+  }
   if (t < .125) return [0, 0, Math.round(128 + t / .125 * 127)];
   if (t < .375) return [0, Math.round((t - .125) / .25 * 255), 255];
   if (t < .625) return [Math.round((t - .375) / .25 * 255), 255, Math.round(255 - (t - .375) / .25 * 255)];
   if (t < .875) return [255, Math.round(255 - (t - .625) / .25 * 255), 0];
   return [Math.round(255 - (t - .875) / .125 * 127), 0, 0];
 }
+
+function clampNumber(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
+function sanitizeDistanceStep(step, traceCount = 0, fallbackStep = NaN) {
+  for (const candidate of [step, fallbackStep]) {
+    const v = Number(candidate);
+    const total = v * Math.max(1, traceCount - 1);
+    if (Number.isFinite(v) && v > 0 && v < 1000 && total < 1_000_000) return v;
+  }
+  return NaN;
+}
+
+function axisNumber(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  const a = Math.abs(n);
+  if (a >= 1000) return n.toFixed(0);
+  if (a >= 100) return n.toFixed(1);
+  if (a >= 10) return n.toFixed(1);
+  return n.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function setupCanvas(canvas, opts = {}) {
+  const rect = !opts.width && !opts.height ? canvas.parentElement?.getBoundingClientRect?.() : null;
+  const cssW = Math.max(1, Math.floor(opts.width || rect?.width || canvas.clientWidth || canvas.width || 900));
+  const cssH = Math.max(1, Math.floor(opts.height || rect?.height || canvas.clientHeight || canvas.height || 320));
+  const dpr = Math.max(1, Number(opts.pixelRatio || devicePixelRatio || 1));
+  canvas.width = Math.max(1, Math.floor(cssW * dpr));
+  canvas.height = Math.max(1, Math.floor(cssH * dpr));
+  canvas.style.width = `${cssW}px`;
+  canvas.style.height = `${cssH}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, cssW, cssH, dpr };
+}
+
+function plotLayout(width, height, opts = {}) {
+  if (opts.axes !== true) return { plot: { x: 0, y: 0, w: width, h: height }, axes: false, colorbar: false };
+  const colorbar = opts.colorbar === true;
+  let left = opts.leftMargin ?? (width < 520 ? 58 : 68);
+  let bottom = opts.bottomMargin ?? (height < 220 ? 38 : 46);
+  let top = opts.topMargin ?? 12;
+  let right = opts.rightMargin ?? (colorbar ? 58 : 16);
+  if (width - left - right < 120) { left = 44; right = colorbar ? 46 : 8; }
+  if (height - top - bottom < 80) { top = 8; bottom = 32; }
+  const plot = {
+    x: left,
+    y: top,
+    w: Math.max(1, width - left - right),
+    h: Math.max(1, height - top - bottom)
+  };
+  return { plot, axes: true, colorbar };
+}
+
+function datasetPlotScale(ds, opts, layout) {
+  const traces = Math.max(1, ds?.numTraces || opts.traceCount || 1);
+  const samples = Math.max(1, ds?.numSamples || opts.sampleCount || 1);
+  const sampleMax = Math.max(1, Math.min(samples, Math.floor(opts.sampleMax || samples)));
+  let traceStart = clampNumber(opts.traceStart ?? 0, 0, traces - 1);
+  let traceEnd = clampNumber(opts.traceEnd ?? traces - 1, 0, traces - 1);
+  if (traceEnd < traceStart) [traceStart, traceEnd] = [traceEnd, traceStart];
+  if (traceEnd - traceStart < 1) traceEnd = Math.min(traces - 1, traceStart + 1);
+  let sampleStart = clampNumber(opts.sampleStart ?? 0, 0, sampleMax);
+  let sampleEnd = clampNumber(opts.sampleEnd ?? sampleMax, 0, sampleMax);
+  if (sampleEnd < sampleStart) [sampleStart, sampleEnd] = [sampleEnd, sampleStart];
+  if (sampleEnd - sampleStart < 1) sampleEnd = Math.min(sampleMax, sampleStart + 1);
+  const depthMax = Math.max(1e-9, Number(opts.depthMax || opts.modelDepthMax || sampleMax));
+  const depthStep = Math.max(1e-12, Number(opts.depthStep || depthMax / Math.max(1, sampleMax)));
+  const depthStart = opts.depthStart ?? sampleStart * depthStep;
+  const depthEnd = opts.depthEnd ?? sampleEnd * depthStep;
+  const distanceStep = sanitizeDistanceStep(opts.distanceStep, traces, opts.fallbackDistanceStep);
+  return { traces, samples, sampleMax, traceStart, traceEnd, sampleStart, sampleEnd, depthMax, depthStep, depthStart, depthEnd, distanceStep, layout };
+}
+
+function traceToPlotX(trace, render) {
+  const { plot } = render.layout, s = render.scale;
+  return plot.x + (trace - s.traceStart) / Math.max(1e-9, s.traceEnd - s.traceStart) * plot.w;
+}
+
+function sampleToPlotY(sample, render) {
+  const { plot } = render.layout, s = render.scale;
+  return plot.y + (sample - s.sampleStart) / Math.max(1e-9, s.sampleEnd - s.sampleStart) * plot.h;
+}
+
+function depthToPlotY(depth, render) {
+  const { plot } = render.layout, s = render.scale;
+  return plot.y + (depth - s.depthStart) / Math.max(1e-9, s.depthEnd - s.depthStart) * plot.h;
+}
+
+function plotToTraceSample(x, y, render) {
+  const { plot } = render.layout, s = render.scale;
+  if (x < plot.x || x > plot.x + plot.w || y < plot.y || y > plot.y + plot.h) return null;
+  const trace = s.traceStart + (x - plot.x) / Math.max(1, plot.w) * (s.traceEnd - s.traceStart);
+  const sample = s.sampleStart + (y - plot.y) / Math.max(1, plot.h) * (s.sampleEnd - s.sampleStart);
+  return {
+    traceIndex: Math.max(0, Math.min(s.traces - 1, Math.round(trace))),
+    sampleIndex: Math.max(0, Math.min(s.samples - 1, Math.round(sample)))
+  };
+}
+
+function drawPlotAxes(ctx, render, opts = {}) {
+  if (opts.axes !== true) return;
+  const { cssW, cssH, layout, scale } = render;
+  const { plot } = layout;
+  const ticksX = plot.w < 260 ? 3 : 5;
+  const ticksY = plot.h < 180 ? 3 : 5;
+  ctx.save();
+  ctx.strokeStyle = "rgba(238,246,255,.82)";
+  ctx.fillStyle = "#f8fcff";
+  ctx.lineWidth = 1.1;
+  ctx.font = `${plot.w < 260 ? 10 : 11}px Consolas, monospace`;
+  ctx.shadowColor = "rgba(0,0,0,.55)";
+  ctx.shadowBlur = 3;
+  ctx.strokeRect(plot.x + 0.5, plot.y + 0.5, plot.w - 1, plot.h - 1);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (let i = 0; i <= ticksX; i++) {
+    const f = i / ticksX;
+    const x = plot.x + f * plot.w;
+    const trace = scale.traceStart + f * (scale.traceEnd - scale.traceStart);
+    const label = Number.isFinite(scale.distanceStep) ? `${axisNumber(trace * scale.distanceStep)} m` : `T${Math.round(trace)}`;
+    ctx.beginPath(); ctx.moveTo(x, plot.y + plot.h); ctx.lineTo(x, plot.y + plot.h + 7); ctx.stroke();
+    ctx.fillText(label, x, plot.y + plot.h + 10);
+  }
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= ticksY; i++) {
+    const f = i / ticksY;
+    const y = plot.y + f * plot.h;
+    const depth = scale.depthStart + f * (scale.depthEnd - scale.depthStart);
+    ctx.beginPath(); ctx.moveTo(plot.x - 7, y); ctx.lineTo(plot.x, y); ctx.stroke();
+    ctx.fillText(`${axisNumber(depth)} m`, plot.x - 10, y);
+  }
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(Number.isFinite(scale.distanceStep) ? "Distance (m)" : "Trace", plot.x + plot.w / 2, cssH - 4);
+  ctx.save();
+  ctx.translate(16, plot.y + plot.h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText("Depth (m)", 0, 0);
+  ctx.restore();
+  if (layout.colorbar) {
+    const bx = plot.x + plot.w + 14, by = plot.y, bw = 14, bh = plot.h;
+    const gradSteps = Math.max(1, Math.floor(bh));
+    for (let y = 0; y < gradSteps; y++) {
+      const [r, g, b] = colorOf(opts.cmap || "seismic", 1 - y / Math.max(1, gradSteps - 1));
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(bx, by + y, bw, 1);
+    }
+    ctx.strokeStyle = "rgba(238,246,255,.65)";
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.fillStyle = "#f8fcff";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(axisNumber(opts.max ?? 1), bx + bw + 5, by);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(axisNumber(opts.min ?? 0), bx + bw + 5, by + bh);
+  }
+  ctx.restore();
+}
+
+function horizonDepthAtTrace(hzn, trace, traceCount = 1) {
+  const line = hzn?.line || [];
+  if (!line.length) return NaN;
+  if (line.length === 1 || traceCount <= 1) return Number.isFinite(line[0]) ? line[0] : NaN;
+  const pos = trace / Math.max(1, traceCount - 1) * (line.length - 1);
+  const i = Math.max(0, Math.min(line.length - 1, Math.floor(pos)));
+  const j = Math.min(line.length - 1, i + 1);
+  const f = pos - i;
+  const a = Number(line[i]), b = Number(line[j]);
+  if (Number.isFinite(a) && Number.isFinite(b)) return a + (b - a) * f;
+  return Number.isFinite(a) ? a : (Number.isFinite(b) ? b : NaN);
+}
+
 function renderDatasetCanvas(canvas, ds, opts = {}) {
   if (!canvas || !ds) return;
-  const rect = canvas.parentElement?.getBoundingClientRect?.() || { width: canvas.width || 900, height: canvas.height || 320 };
-  const dpr = devicePixelRatio || 1, w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
-  canvas.width = w * dpr; canvas.height = h * dpr; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
-  const ctx = canvas.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
-  const img = ctx.createImageData(w, h), min = opts.min ?? -10, max = opts.max ?? 10, range = max - min || 1;
-  const displaySamples = Math.min(ds.numSamples, opts.sampleMax || ds.numSamples);
-  for (let y = 0; y < h; y++) {
-    const s = Math.min(ds.numSamples - 1, Math.floor(y / h * displaySamples));
-    for (let x = 0; x < w; x++) {
-      const t = Math.min(ds.numTraces - 1, Math.floor(x / w * ds.numTraces));
-      const [r,g,b] = colorOf(opts.cmap || "seismic", (ds.data[t * ds.numSamples + s] - min) / range);
-      const i = (y * w + x) * 4; img.data[i] = r; img.data[i+1] = g; img.data[i+2] = b; img.data[i+3] = 255;
+  const prepared = setupCanvas(canvas, opts);
+  const layout = plotLayout(prepared.cssW, prepared.cssH, opts);
+  const render = { ...prepared, layout, scale: datasetPlotScale(ds, opts, layout) };
+  const { ctx } = render, { plot } = layout;
+  const min = Number(opts.min ?? -10), max = Number(opts.max ?? 10), range = max - min || 1;
+  ctx.fillStyle = opts.background || "#080c14";
+  ctx.fillRect(0, 0, prepared.cssW, prepared.cssH);
+  const plotW = Math.max(1, Math.floor(plot.w)), plotH = Math.max(1, Math.floor(plot.h));
+  const off = document.createElement("canvas");
+  off.width = plotW; off.height = plotH;
+  const offCtx = off.getContext("2d");
+  const img = offCtx.createImageData(plotW, plotH);
+  for (let y = 0; y < plotH; y++) {
+    const sample = render.scale.sampleStart + y / Math.max(1, plotH - 1) * (render.scale.sampleEnd - render.scale.sampleStart);
+    const s = Math.max(0, Math.min(ds.numSamples - 1, Math.round(sample)));
+    for (let x = 0; x < plotW; x++) {
+      const trace = render.scale.traceStart + x / Math.max(1, plotW - 1) * (render.scale.traceEnd - render.scale.traceStart);
+      const t = Math.max(0, Math.min(ds.numTraces - 1, Math.round(trace)));
+      const [r, g, b] = colorOf(opts.cmap || "seismic", (ds.data[t * ds.numSamples + s] - min) / range);
+      const i = (y * plotW + x) * 4; img.data[i] = r; img.data[i+1] = g; img.data[i+2] = b; img.data[i+3] = 255;
     }
   }
-  ctx.putImageData(img, 0, 0);
+  offCtx.putImageData(img, 0, 0);
+  ctx.drawImage(off, plot.x, plot.y, plot.w, plot.h);
   if (opts.horizons?.length) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.x, plot.y, plot.w, plot.h);
+    ctx.clip();
     ctx.lineWidth = 1.3; ctx.setLineDash([5,3]);
     const colors = ["#ffe066","#69db7c","#74c0fc","#ff922b","#da77f2","#63e6be"];
     opts.horizons.forEach((hzn, i) => {
       ctx.strokeStyle = colors[i % colors.length]; ctx.beginPath();
-      const line = hzn.line || [];
-      for (let x = 0; x < w; x++) {
-        const t = Math.min(line.length - 1, Math.floor(x / w * line.length));
-        const y = (line[t] / (opts.modelDepthMax || 24)) * h;
-        x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      let started = false;
+      for (let x = 0; x <= plotW; x++) {
+        const trace = render.scale.traceStart + x / Math.max(1, plotW) * (render.scale.traceEnd - render.scale.traceStart);
+        const depth = horizonDepthAtTrace(hzn, trace, render.scale.traces);
+        if (!Number.isFinite(depth)) { started = false; continue; }
+        const y = depthToPlotY(depth, render);
+        const px = plot.x + x / Math.max(1, plotW) * plot.w;
+        if (y < plot.y - 4 || y > plot.y + plot.h + 4) { started = false; continue; }
+        started ? ctx.lineTo(px, y) : ctx.moveTo(px, y);
+        started = true;
       }
       ctx.stroke();
     });
     ctx.setLineDash([]);
+    ctx.restore();
   }
   if (opts.clusters?.length) {
     ctx.save();
+    ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
     ctx.lineWidth = 1.2;
     ctx.strokeStyle = "#63e6be";
     ctx.setLineDash([7, 5]);
-    const depthMax = opts.depthMax || opts.modelDepthMax || displaySamples;
     for (const c of opts.clusters) {
       const depth = Number(c.depth ?? c.meanDepth ?? c.medianDepth);
       if (!Number.isFinite(depth)) continue;
-      const y = depth / Math.max(depthMax, 1e-9) * h;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      const y = depthToPlotY(depth, render);
+      if (y < plot.y || y > plot.y + plot.h) continue;
+      ctx.beginPath(); ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.w, y); ctx.stroke();
     }
     ctx.restore();
   }
   if (opts.peaks?.length) {
     ctx.save();
+    ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
     ctx.fillStyle = "#fff200";
     ctx.strokeStyle = "rgba(2,8,18,.85)";
-    const depthMax = opts.depthMax || opts.modelDepthMax || displaySamples;
-    const step = opts.depthStep || (depthMax / Math.max(1, displaySamples));
     const stride = Math.max(1, Math.ceil(opts.peaks.length / 2500));
     for (let i = 0; i < opts.peaks.length; i += stride) {
       const p = opts.peaks[i];
-      const x = (Number(p.t) || 0) / Math.max(1, ds.numTraces - 1) * w;
-      const depth = Number.isFinite(Number(p.depth)) ? Number(p.depth) : (Number(p.sample) || 0) * step;
-      const y = depth / Math.max(depthMax, 1e-9) * h;
+      const trace = Number(p.t ?? p.trace ?? p.traceIndex) || 0;
+      if (trace < render.scale.traceStart || trace > render.scale.traceEnd) continue;
+      const depth = Number.isFinite(Number(p.depth)) ? Number(p.depth) : (Number(p.sample ?? p.sampleIndex) || 0) * render.scale.depthStep;
+      const x = traceToPlotX(trace, render), y = depthToPlotY(depth, render);
+      if (y < plot.y || y > plot.y + plot.h) continue;
       ctx.beginPath(); ctx.arc(x, y, 2.1, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     }
     ctx.restore();
   }
-  if (opts.axes) {
-    const depthMax = opts.depthMax || opts.modelDepthMax || displaySamples;
-    const traceMax = Math.max(0, (ds.numTraces || 1) - 1);
-    ctx.save();
-    ctx.lineWidth = 1.2;
-    ctx.strokeStyle = "rgba(248,252,255,.88)";
-    ctx.fillStyle = "#f8fcff";
-    ctx.shadowColor = "rgba(0,0,0,.95)";
-    ctx.shadowBlur = 5;
-    ctx.font = "11px Consolas";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-    for (let i = 0; i <= 5; i++) {
-      const x = i / 5 * (w - 1);
-      const trace = Math.round(i / 5 * traceMax);
-      const label = Number.isFinite(opts.distanceStep) ? `${(trace * opts.distanceStep).toFixed(1)} m` : String(trace);
-      ctx.beginPath(); ctx.moveTo(x, h - 1); ctx.lineTo(x, h - 9); ctx.stroke();
-      ctx.fillText(label, x, h - 21);
-    }
-    ctx.textAlign = "right";
-    ctx.textBaseline = "middle";
-    for (let i = 0; i <= 5; i++) {
-      const y = i / 5 * (h - 1);
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(9, y); ctx.stroke();
-      ctx.fillText(`${(i / 5 * depthMax).toFixed(1)} m`, 54, y);
-    }
-    ctx.textAlign = "center";
-    ctx.textBaseline = "bottom";
-    ctx.fillText(Number.isFinite(opts.distanceStep) ? "Distance (m)" : "Trace", w / 2, h - 2);
-    ctx.save();
-    ctx.translate(15, h / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.fillText("Depth (m)", 0, 0);
-    ctx.restore();
-    ctx.restore();
-  }
+  drawPlotAxes(ctx, render, opts);
+  return render;
 }
 function drawSelectionPreview() {
   if (!$("#selection-preview")) return;
@@ -1524,14 +1694,12 @@ async function runGeoPipelineStep(op) {
   try {
     const result = await runWorker(op, ds, params);
     geologyPipelineState[op] = result;
-    activeManualGeoOp = op;
+    activeGeoPipelineOp = op;
     updateGeoPipelineButtons(op);
-    if (op === "geo-classify-model") manualGeoResult = {
-      ...result,
-      numTraces: result.numTraces,
-      numSamples: result.numSamples,
-      layerNames: result.layerNames || []
-    };
+    if (op === "geo-classify-model") {
+      geologyResult = result;
+      drawGeologyResult();
+    }
     drawGeoPipelineResult(op, result, def);
     $("#footer-status").textContent = `${def?.[1] || op} 完成`;
     toast(`${def?.[1] || op} 完成`);
@@ -1544,7 +1712,7 @@ async function runGeoPipelineStep(op) {
 function drawGeoPipelineResult(op, result, def) {
   if (!result) return;
   const preview = { data: result.data, numTraces: result.numTraces, numSamples: result.numSamples };
-  renderDatasetCanvas($("#manual-geo-radar-canvas"), preview, {
+  renderDatasetCanvas($("#geo-step-canvas"), preview, {
     cmap: "seismic",
     min: -2.2,
     max: 2.2,
@@ -1556,10 +1724,11 @@ function drawGeoPipelineResult(op, result, def) {
     depthStep: result.depthStep,
     distanceStep: result.distanceStep || result.dx,
     axes: true,
+    colorbar: true,
     sampleMax: result.depthStep ? Math.ceil((result.modelDepthMax || 24) / result.depthStep) : result.numSamples
   });
-  drawManualHistogram(result);
-  if (result.modelData) drawLayerModelCanvas($("#manual-geo-model-canvas"), result);
+  drawGeoStepHistogram(result);
+  if (result.modelData) drawLayerModelCanvas($("#geo-step-model-canvas"), result);
   const details = [];
   if (result.peaks) details.push(`峰值 ${result.peaks.length} 个`);
   if (result.clusters) details.push(`聚类 ${result.clusters.length} 个`);
@@ -1567,7 +1736,8 @@ function drawGeoPipelineResult(op, result, def) {
   if (result.seeds) details.push(`候选层位 ${result.seeds.length} 个`);
   if (result.horizons) details.push(`层位线 ${result.horizons.length} 条`);
   if (result.modelData) details.push(`模型 ${result.modelTraces} 道 × ${result.modelSamples} 深度格`);
-  $("#manual-geo-report").innerHTML = `<b>${def?.[1] || op}</b><p>${def?.[2] || ""}</p><p>${details.join("；") || "已生成预览数据。"}</p><p class="muted">每步会自动补齐前置计算；当前结果只保存在手动流水线状态中，点击保存才写入 Output Data。</p>`;
+  const report = $("#geo-step-report");
+  if (report) report.innerHTML = `<b>${escapeHtml(def?.[1] || op)}</b><p>${escapeHtml(def?.[2] || "")}</p><p>${escapeHtml(details.join("；") || "已生成预览数据。")}</p><p class="muted">每步会自动补齐前置计算，并在自动建模页展示全过程；手动解释工作台不会被覆盖。</p>`;
 }
 function updateGeoPipelineButtons(activeOp = "") {
   $$("[data-geo-step]").forEach(btn => {
@@ -1578,14 +1748,14 @@ function updateGeoPipelineButtons(activeOp = "") {
 }
 
 function drawManualGeoResult() {
-  if (!activeManualGeoOp) return;
-  const def = geoPipelineDefs.find(x => x[0] === activeManualGeoOp);
-  const result = geologyPipelineState[activeManualGeoOp];
-  if (result) drawGeoPipelineResult(activeManualGeoOp, result, def);
+  if (!activeGeoPipelineOp) return;
+  const def = geoPipelineDefs.find(x => x[0] === activeGeoPipelineOp);
+  const result = geologyPipelineState[activeGeoPipelineOp];
+  if (result) drawGeoPipelineResult(activeGeoPipelineOp, result, def);
 }
 
-function drawManualHistogram(result) {
-  const canvas = $("#manual-geo-chart-canvas");
+function drawGeoStepHistogram(result) {
+  const canvas = $("#geo-step-chart-canvas");
   if (!canvas) return;
   const rect = canvas.parentElement?.getBoundingClientRect?.() || { width: 900, height: 180 };
   const dpr = devicePixelRatio || 1, w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
@@ -1649,9 +1819,10 @@ function ensureManualState() {
   const ds = currentDisplayed();
   const id = manualDatasetId(ds);
   if (!manualInterpretationState || manualInterpretationState.datasetId !== id) {
-    manualInterpretationState = { datasetId: id, activeLayerId: "", layers: [], displayMode: "radar", snapEnabled: true, cursorTrace: 0, history: [], future: [] };
+    manualInterpretationState = { datasetId: id, activeLayerId: "", layers: [], displayMode: "radar", snapEnabled: true, cursorTrace: 0, history: [], future: [], view: null };
     manualFeatureResult = null;
     manualModelResult = null;
+    manualCanvasRender = null;
   }
   return manualInterpretationState;
 }
@@ -1716,16 +1887,17 @@ function manualSnapPoint(point) {
   return enrichManualPoint(best, ds);
 }
 
-function manualPointFromEvent(e) {
+function manualPointFromEvent(e, snap = true) {
   const ds = currentDisplayed(), canvas = $("#manual-geo-radar-canvas");
   if (!ds || !canvas) return null;
   const rect = canvas.getBoundingClientRect();
-  const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-  const y = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
-  const sampleMax = manualSampleMax(ds);
-  const traceIndex = Math.max(0, Math.min(ds.numTraces - 1, Math.round(x / Math.max(1, rect.width) * (ds.numTraces - 1))));
-  const sampleIndex = Math.max(0, Math.min(ds.numSamples - 1, Math.round(y / Math.max(1, rect.height) * sampleMax)));
-  return manualSnapPoint({ traceIndex, sampleIndex, source: "manual", snapScore: 0 });
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const render = manualCanvasRender || { layout: plotLayout(rect.width, rect.height, { axes: true }), scale: datasetPlotScale(ds, { sampleMax: manualSampleMax(ds) }, plotLayout(rect.width, rect.height, { axes: true })) };
+  const raw = plotToTraceSample(x, y, render);
+  if (!raw) return null;
+  const point = { ...raw, source: "manual", snapScore: 0 };
+  return snap ? manualSnapPoint(point) : enrichManualPoint(point, ds);
 }
 
 function sortLayerPoints(layer) {
@@ -1743,16 +1915,18 @@ function addManualPoint(layer, point, minTraceGap = 1) {
 function nearestManualPoint(point, maxPx = 16) {
   const st = ensureManualState(), ds = currentDisplayed(), canvas = $("#manual-geo-radar-canvas");
   if (!ds || !canvas) return null;
-  const rect = canvas.getBoundingClientRect(), sampleMax = manualSampleMax(ds);
+  const render = manualCanvasRender;
+  if (!render) return null;
   let best = null, bestD = maxPx;
-  const qx = point.traceIndex / Math.max(1, ds.numTraces - 1) * rect.width;
-  const qy = point.sampleIndex / Math.max(1, sampleMax) * rect.height;
+  const qx = traceToPlotX(point.traceIndex, render);
+  const qy = sampleToPlotY(point.sampleIndex, render);
   for (const layer of st.layers) {
     if (!layer.visible || layer.locked) continue;
     for (let i = 0; i < layer.points.length; i++) {
       const p = layer.points[i];
-      const px = p.traceIndex / Math.max(1, ds.numTraces - 1) * rect.width;
-      const py = p.sampleIndex / Math.max(1, sampleMax) * rect.height;
+      if (p.traceIndex < render.scale.traceStart || p.traceIndex > render.scale.traceEnd || p.sampleIndex < render.scale.sampleStart || p.sampleIndex > render.scale.sampleEnd) continue;
+      const px = traceToPlotX(p.traceIndex, render);
+      const py = sampleToPlotY(p.sampleIndex, render);
       const dist = Math.hypot(px - qx, py - qy);
       if (dist < bestD) { bestD = dist; best = { layer, index: i, point: p }; }
     }
@@ -1784,53 +1958,200 @@ function manualDisplayRange(mode) {
   return { min: -10, max: 10, cmap: "seismic" };
 }
 
+function normalizeManualView(view, ds) {
+  const sampleMax = manualSampleMax(ds), traceMax = Math.max(1, (ds?.numTraces || 1) - 1);
+  view.traceStart = clampNumber(view.traceStart ?? 0, 0, traceMax);
+  view.traceEnd = clampNumber(view.traceEnd ?? traceMax, 0, traceMax);
+  if (view.traceEnd < view.traceStart) [view.traceStart, view.traceEnd] = [view.traceEnd, view.traceStart];
+  if (view.traceEnd - view.traceStart < 4) {
+    const c = (view.traceStart + view.traceEnd) / 2;
+    view.traceStart = Math.max(0, c - 2);
+    view.traceEnd = Math.min(traceMax, c + 2);
+  }
+  view.sampleStart = clampNumber(view.sampleStart ?? 0, 0, sampleMax);
+  view.sampleEnd = clampNumber(view.sampleEnd ?? sampleMax, 0, sampleMax);
+  if (view.sampleEnd < view.sampleStart) [view.sampleStart, view.sampleEnd] = [view.sampleEnd, view.sampleStart];
+  if (view.sampleEnd - view.sampleStart < 8) {
+    const c = (view.sampleStart + view.sampleEnd) / 2;
+    view.sampleStart = Math.max(0, c - 4);
+    view.sampleEnd = Math.min(sampleMax, c + 4);
+  }
+  view.min = Number.isFinite(Number(view.min)) ? Number(view.min) : -10;
+  view.max = Number.isFinite(Number(view.max)) && Number(view.max) !== view.min ? Number(view.max) : view.min + 1;
+  return view;
+}
+
+function ensureManualView(ds = currentDisplayed(), mode = null) {
+  const st = ensureManualState();
+  const displayMode = mode || $("#manual-display-mode")?.value || st.displayMode || "radar";
+  const defaults = manualDisplayRange(displayMode);
+  if (!st.view || st.view.mode !== displayMode) {
+    const old = st.view || {};
+    st.view = {
+      mode: displayMode,
+      traceStart: old.traceStart ?? 0,
+      traceEnd: old.traceEnd ?? Math.max(1, (ds?.numTraces || 1) - 1),
+      sampleStart: old.sampleStart ?? 0,
+      sampleEnd: old.sampleEnd ?? manualSampleMax(ds),
+      cmap: old.mode === displayMode ? (old.cmap || defaults.cmap) : defaults.cmap,
+      min: old.mode === displayMode ? (old.min ?? defaults.min) : defaults.min,
+      max: old.mode === displayMode ? (old.max ?? defaults.max) : defaults.max,
+      autoRange: false
+    };
+  }
+  return normalizeManualView(st.view, ds);
+}
+
+function syncManualViewControls(view = ensureManualView()) {
+  if ($("#manual-cmap")) $("#manual-cmap").value = view.cmap || "seismic";
+  if ($("#manual-min")) $("#manual-min").value = Number(view.min).toFixed(3).replace(/\.?0+$/, "");
+  if ($("#manual-max")) $("#manual-max").value = Number(view.max).toFixed(3).replace(/\.?0+$/, "");
+}
+
+function readManualViewControls() {
+  const view = ensureManualView();
+  if ($("#manual-cmap")) view.cmap = $("#manual-cmap").value || view.cmap;
+  if ($("#manual-min")) view.min = Number($("#manual-min").value);
+  if ($("#manual-max")) view.max = Number($("#manual-max").value);
+  normalizeManualView(view, currentDisplayed());
+  drawManualWorkbench();
+}
+
+function resetManualView() {
+  const ds = currentDisplayed();
+  if (!ds) return;
+  const st = ensureManualState();
+  const mode = $("#manual-display-mode")?.value || st.displayMode || "radar";
+  const defaults = manualDisplayRange(mode);
+  st.view = { mode, traceStart: 0, traceEnd: Math.max(1, ds.numTraces - 1), sampleStart: 0, sampleEnd: manualSampleMax(ds), cmap: defaults.cmap, min: defaults.min, max: defaults.max, autoRange: false };
+  drawManualWorkbench();
+}
+
+function setManualAutoRange() {
+  const ds = manualDisplayDataset();
+  const source = currentDisplayed();
+  if (!ds || !source) return;
+  const view = ensureManualView(source);
+  const values = [];
+  const traceStep = Math.max(1, Math.ceil((view.traceEnd - view.traceStart) / 280));
+  const sampleStep = Math.max(1, Math.ceil((view.sampleEnd - view.sampleStart) / 280));
+  for (let t = Math.round(view.traceStart); t <= Math.round(view.traceEnd); t += traceStep) {
+    if (t < 0 || t >= ds.numTraces) continue;
+    for (let s = Math.round(view.sampleStart); s <= Math.round(view.sampleEnd); s += sampleStep) {
+      if (s < 0 || s >= ds.numSamples) continue;
+      const v = ds.data[t * ds.numSamples + s];
+      if (Number.isFinite(v)) values.push(v);
+    }
+  }
+  if (values.length < 8) return toast("当前视窗数据不足，无法自动范围", "warn");
+  values.sort((a, b) => a - b);
+  view.min = values[Math.floor(values.length * 0.02)];
+  view.max = values[Math.floor(values.length * 0.98)];
+  if (view.max <= view.min) { view.min -= 1; view.max += 1; }
+  view.autoRange = true;
+  drawManualWorkbench();
+}
+
+function zoomManualViewAt(point, factor, axes = "both") {
+  const ds = currentDisplayed();
+  if (!ds || !point) return;
+  const view = ensureManualView(ds);
+  const fx = Math.max(0.02, Math.min(0.98, (point.traceIndex - view.traceStart) / Math.max(1e-9, view.traceEnd - view.traceStart)));
+  const fy = Math.max(0.02, Math.min(0.98, (point.sampleIndex - view.sampleStart) / Math.max(1e-9, view.sampleEnd - view.sampleStart)));
+  if (axes === "both" || axes === "x") {
+    const span = Math.max(4, (view.traceEnd - view.traceStart) * factor);
+    view.traceStart = point.traceIndex - span * fx;
+    view.traceEnd = point.traceIndex + span * (1 - fx);
+  }
+  if (axes === "both" || axes === "y") {
+    const span = Math.max(8, (view.sampleEnd - view.sampleStart) * factor);
+    view.sampleStart = point.sampleIndex - span * fy;
+    view.sampleEnd = point.sampleIndex + span * (1 - fy);
+  }
+  normalizeManualView(view, ds);
+  drawManualWorkbench();
+}
+
+function panManualView(startView, dxPx, dyPx) {
+  const ds = currentDisplayed();
+  const render = manualCanvasRender;
+  if (!ds || !render || !startView) return;
+  const traceDelta = -dxPx / Math.max(1, render.layout.plot.w) * (startView.traceEnd - startView.traceStart);
+  const sampleDelta = -dyPx / Math.max(1, render.layout.plot.h) * (startView.sampleEnd - startView.sampleStart);
+  const view = ensureManualView(ds);
+  view.traceStart = startView.traceStart + traceDelta;
+  view.traceEnd = startView.traceEnd + traceDelta;
+  view.sampleStart = startView.sampleStart + sampleDelta;
+  view.sampleEnd = startView.sampleEnd + sampleDelta;
+  normalizeManualView(view, ds);
+  drawManualWorkbench();
+}
+
 function drawManualWorkbench() {
   const ds = currentDisplayed(), canvas = $("#manual-geo-radar-canvas");
   if (!ds || !canvas) return;
   const st = ensureManualState();
   const mode = $("#manual-display-mode")?.value || st.displayMode || "radar";
   const viewDs = manualDisplayDataset();
-  const range = manualDisplayRange(mode);
+  const view = ensureManualView(ds, mode);
   const rp = getEffectiveRadarParams(ds);
-  renderDatasetCanvas(canvas, viewDs, { ...range, axes: true, depthMax: manualSampleMax(ds) * manualDepthStep(ds), sampleMax: manualSampleMax(ds), distanceStep: rp.dxM, horizons: mode === "auto" ? geologyResult?.horizons || [] : [] });
+  manualCanvasRender = renderDatasetCanvas(canvas, viewDs, {
+    cmap: view.cmap,
+    min: view.min,
+    max: view.max,
+    axes: true,
+    colorbar: true,
+    traceStart: view.traceStart,
+    traceEnd: view.traceEnd,
+    sampleStart: view.sampleStart,
+    sampleEnd: view.sampleEnd,
+    depthMax: manualSampleMax(ds) * manualDepthStep(ds),
+    sampleMax: manualSampleMax(ds),
+    distanceStep: rp.dxM,
+    horizons: mode === "auto" ? geologyResult?.horizons || [] : []
+  });
   drawManualLayerOverlay();
   renderManualLayerList();
   drawManualTraceAndSpectrum(st.cursorTrace || 0);
   if (manualModelResult) drawLayerModelCanvas($("#manual-geo-model-canvas"), manualModelResult);
+  syncManualViewControls(view);
 }
 
-function drawManualLayerOverlay() {
-  const ds = currentDisplayed(), canvas = $("#manual-geo-radar-canvas");
-  if (!ds || !canvas) return;
-  const st = ensureManualState();
-  const ctx = canvas.getContext("2d"), dpr = devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight, sampleMax = manualSampleMax(ds);
+function drawManualLayersOnRender(render, layers, activeLayerId = "") {
+  if (!render) return;
+  const ctx = render.ctx, { plot } = render.layout;
   ctx.save();
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
   ctx.lineWidth = 2;
   ctx.font = "12px Consolas";
-  for (const layer of st.layers) {
+  for (const layer of layers || []) {
     if (!layer.visible || !layer.points.length) continue;
     ctx.strokeStyle = layer.color;
     ctx.fillStyle = layer.color;
     ctx.globalAlpha = layer.source === "auto" ? 0.58 : 0.95;
     ctx.beginPath();
     layer.points.forEach((p, i) => {
-      const x = p.traceIndex / Math.max(1, ds.numTraces - 1) * w;
-      const y = p.sampleIndex / Math.max(1, sampleMax) * h;
+      const x = traceToPlotX(p.traceIndex, render);
+      const y = sampleToPlotY(p.sampleIndex, render);
       i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
     });
     ctx.stroke();
     for (const p of layer.points) {
-      const x = p.traceIndex / Math.max(1, ds.numTraces - 1) * w;
-      const y = p.sampleIndex / Math.max(1, sampleMax) * h;
-      ctx.beginPath(); ctx.arc(x, y, layer.id === st.activeLayerId ? 3.5 : 2.2, 0, Math.PI * 2); ctx.fill();
+      if (p.traceIndex < render.scale.traceStart || p.traceIndex > render.scale.traceEnd || p.sampleIndex < render.scale.sampleStart || p.sampleIndex > render.scale.sampleEnd) continue;
+      const x = traceToPlotX(p.traceIndex, render);
+      const y = sampleToPlotY(p.sampleIndex, render);
+      ctx.beginPath(); ctx.arc(x, y, layer.id === activeLayerId ? 3.5 : 2.2, 0, Math.PI * 2); ctx.fill();
     }
-    const first = layer.points[0];
-    if (first) ctx.fillText(layer.name, first.traceIndex / Math.max(1, ds.numTraces - 1) * w + 4, first.sampleIndex / Math.max(1, sampleMax) * h - 6);
+    const first = layer.points.find(p => p.traceIndex >= render.scale.traceStart && p.traceIndex <= render.scale.traceEnd && p.sampleIndex >= render.scale.sampleStart && p.sampleIndex <= render.scale.sampleEnd);
+    if (first) ctx.fillText(layer.name, traceToPlotX(first.traceIndex, render) + 4, sampleToPlotY(first.sampleIndex, render) - 6);
   }
   ctx.globalAlpha = 1;
   ctx.restore();
+}
+
+function drawManualLayerOverlay() {
+  const st = ensureManualState();
+  drawManualLayersOnRender(manualCanvasRender, st.layers, st.activeLayerId);
 }
 
 function renderManualLayerList() {
@@ -1957,7 +2278,7 @@ function generateManualModel() {
 }
 
 function saveManualGeoOutput() {
-  const result = manualModelResult || (activeManualGeoOp ? geologyPipelineState[activeManualGeoOp] : manualGeoResult);
+  const result = manualModelResult;
   if (!result) return toast("请先生成手动地质模型", "warn");
   const ds = currentDisplayed();
   store.setOutput({
@@ -1978,6 +2299,142 @@ function saveManualGeoOutput() {
   $("#display-mode").value = "output";
   toast("手动地质模型已保存到 Output Data");
 }
+
+function manualReportPayload() {
+  const ds = currentDisplayed();
+  const st = ensureManualState();
+  const rp = getEffectiveRadarParams(ds);
+  return {
+    createdAt: new Date().toISOString(),
+    dataset: {
+      name: ds?.name || "data",
+      sourceFormat: ds?.meta?.sourceFormat || "",
+      numTraces: ds?.numTraces || 0,
+      numSamples: ds?.numSamples || 0
+    },
+    radarParams: {
+      dtNs: rp.dtNs,
+      dxM: sanitizeDistanceStep(rp.dxM, ds?.numTraces || 0),
+      velocityMPerNs: rp.velocityMPerNs,
+      epsilonR: rp.epsilonR,
+      depthMaxM: rp.depthMaxM,
+      vofhText: rp.vofhText
+    },
+    layers: st.layers.map(layer => ({
+      id: layer.id,
+      name: layer.name,
+      color: layer.color,
+      source: layer.source,
+      visible: layer.visible,
+      locked: layer.locked,
+      confidence: layer.confidence,
+      pointCount: layer.points.length,
+      depthRangeM: layer.points.length ? [Math.min(...layer.points.map(p => p.depthM || 0)), Math.max(...layer.points.map(p => p.depthM || 0))] : [0, 0],
+      points: layer.points.map(p => ({ traceIndex: p.traceIndex, sampleIndex: p.sampleIndex, depthM: p.depthM, distanceM: p.distanceM, source: p.source, snapScore: p.snapScore }))
+    })),
+    model: manualModelResult ? {
+      source: manualModelResult.source || "manual",
+      modelTraces: manualModelResult.modelTraces,
+      modelSamples: manualModelResult.modelSamples,
+      modelDepthMax: manualModelResult.modelDepthMax,
+      horizonCount: manualModelResult.horizons?.length || 0
+    } : null,
+    notes: "Manual horizons have priority over snapped, auto, and interpolated segments."
+  };
+}
+
+function renderManualProfileExportCanvas(width = 1600, height = 900) {
+  const ds = currentDisplayed(), viewDs = manualDisplayDataset();
+  if (!ds || !viewDs) return null;
+  const st = ensureManualState(), view = ensureManualView(ds);
+  const rp = getEffectiveRadarParams(ds);
+  const canvas = document.createElement("canvas");
+  const render = renderDatasetCanvas(canvas, viewDs, {
+    width,
+    height,
+    pixelRatio: 2,
+    cmap: view.cmap,
+    min: view.min,
+    max: view.max,
+    axes: true,
+    colorbar: true,
+    traceStart: view.traceStart,
+    traceEnd: view.traceEnd,
+    sampleStart: view.sampleStart,
+    sampleEnd: view.sampleEnd,
+    depthMax: manualSampleMax(ds) * manualDepthStep(ds),
+    sampleMax: manualSampleMax(ds),
+    distanceStep: rp.dxM,
+    horizons: ($("#manual-display-mode")?.value || st.displayMode) === "auto" ? geologyResult?.horizons || [] : []
+  });
+  drawManualLayersOnRender(render, st.layers, st.activeLayerId);
+  return canvas;
+}
+
+function renderManualModelExportCanvas(width = 1600, height = 900) {
+  if (!manualModelResult) return null;
+  const canvas = document.createElement("canvas");
+  drawLayerModelCanvas(canvas, manualModelResult, { width, height, pixelRatio: 2 });
+  return canvas;
+}
+
+function downloadCanvasPng(canvas, name) {
+  if (!canvas) return;
+  canvas.toBlob(blob => blob && download(blob, name));
+}
+
+function ensureManualExportDialog() {
+  let dlg = $("#manual-export-dialog");
+  if (dlg) return dlg;
+  dlg = document.createElement("dialog");
+  dlg.id = "manual-export-dialog";
+  dlg.className = "geo-export-dialog";
+  dlg.innerHTML = '<form method="dialog"><h2>Export Manual Interpretation</h2><div class="export-option-group"><h4>Format</h4><label><input type="radio" name="manual-export-format" value="json"> JSON structure</label><label><input type="radio" name="manual-export-format" value="png" checked> PNG images</label><label><input type="radio" name="manual-export-format" value="html"> HTML report</label><label><input type="radio" name="manual-export-format" value="pdf"> PDF via print</label></div><label>Title<input id="manual-export-title" value="Manual Interpretation Report"></label><menu><button value="cancel">Cancel</button><button value="default" class="primary">Export</button></menu></form>';
+  document.body.appendChild(dlg);
+  return dlg;
+}
+
+function openManualExport() {
+  const ds = currentDisplayed();
+  if (!ds) return toast("请先导入数据", "warn");
+  const dlg = ensureManualExportDialog();
+  dlg.onclose = function() {
+    if (dlg.returnValue !== "default") return;
+    const format = dlg.querySelector("input[name='manual-export-format']:checked")?.value || "png";
+    const title = $("#manual-export-title")?.value || "Manual Interpretation Report";
+    exportManualReport(format, title);
+  };
+  dlg.showModal();
+}
+
+function exportManualReport(format, title) {
+  const payload = manualReportPayload();
+  const base = (payload.dataset.name || "manual-interpretation").replace(/\.\w+$/i, "").replace(/[^\w.-]+/g, "_");
+  if (format === "json") {
+    download(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }), `${base}_manual_interpretation.json`);
+    return;
+  }
+  const profileCanvas = renderManualProfileExportCanvas();
+  const modelCanvas = renderManualModelExportCanvas();
+  if (format === "png") {
+    downloadCanvasPng(profileCanvas, `${base}_manual_profile.png`);
+    if (modelCanvas) downloadCanvasPng(modelCanvas, `${base}_manual_model.png`);
+    else toast("已导出剖面图；尚未生成手动模型图", "warn");
+    return;
+  }
+  const profileUrl = profileCanvas?.toDataURL("image/png") || "";
+  const modelUrl = modelCanvas?.toDataURL("image/png") || "";
+  const layerRows = payload.layers.map(l => `<tr><td>${escapeHtml(l.name)}</td><td>${escapeHtml(l.source || "")}</td><td>${l.pointCount}</td><td>${axisNumber(l.depthRangeM[0])}-${axisNumber(l.depthRangeM[1])} m</td><td>${escapeHtml(l.color)}</td></tr>`).join("");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#1a1a1a}h1{font-size:20px;border-bottom:2px solid #2563eb;padding-bottom:8px}.kpis{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}.kpis span{border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;background:#f8fafc}img{max-width:100%;border:1px solid #d1d5db;margin:10px 0 18px}table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12px}th,td{border:1px solid #d1d5db;padding:6px 8px;text-align:left}th{background:#f3f4f6}.muted{color:#667085}</style></head><body><h1>${escapeHtml(title)}</h1><div class="kpis"><span>${escapeHtml(payload.dataset.name)}</span><span>${payload.dataset.numTraces} traces</span><span>${payload.dataset.numSamples} samples</span><span>dt ${axisNumber(payload.radarParams.dtNs)} ns</span><span>dx ${Number.isFinite(payload.radarParams.dxM) ? axisNumber(payload.radarParams.dxM) + " m" : "trace axis"}</span><span>v ${axisNumber(payload.radarParams.velocityMPerNs)} m/ns</span></div><h2>Radar Profile with Manual Horizons</h2><img src="${profileUrl}">${modelUrl ? `<h2>Manual Geologic Model</h2><img src="${modelUrl}">` : `<p class="muted">Manual model has not been generated yet.</p>`}<h2>Horizon Layers</h2><table><thead><tr><th>Name</th><th>Source</th><th>Points</th><th>Depth range</th><th>Color</th></tr></thead><tbody>${layerRows || "<tr><td colspan='5'>No manual horizons.</td></tr>"}</tbody></table><p class="muted">${escapeHtml(payload.notes)}</p><script>${format === "pdf" ? "print()" : ""}<\/script></body></html>`;
+  if (format === "pdf") {
+    const win = window.open("", "_blank");
+    if (win) { win.document.write(html); win.document.close(); toast("Print dialog opened - save as PDF"); }
+    else { download(new Blob([html], { type: "text/html" }), `${base}_manual_report.html`); toast("Popup blocked - exported HTML instead", "warn"); }
+  } else {
+    download(new Blob([html], { type: "text/html" }), `${base}_manual_report.html`);
+  }
+}
+
 function drawGeologyResult() {
   if (!geologyResult) return;
   renderDatasetCanvas($("#geo-radar-canvas"), { data: geologyResult.data, numTraces: geologyResult.numTraces, numSamples: geologyResult.numSamples }, {
@@ -2036,80 +2493,81 @@ function paintImageLine(img, w, h, x0, y0, x1, y1, rgb, radius = 0) {
     if (e2 <= dx) { err += dx; y0 += sy; }
   }
 }
-function drawLayerModelCanvas(canvas, result) {
+function drawLayerModelCanvas(canvas, result, opts = {}) {
   if (!canvas || !result) return;
-  const rect = canvas.parentElement.getBoundingClientRect(), dpr = devicePixelRatio || 1;
-  const cssW = Math.max(1, Math.floor(rect.width)), cssH = Math.max(1, Math.floor(rect.height));
-  const w = Math.max(1, Math.floor(cssW * dpr)), h = Math.max(1, Math.floor(cssH * dpr));
-  canvas.width = w; canvas.height = h; canvas.style.width = `${cssW}px`; canvas.style.height = `${cssH}px`;
-  const ctx = canvas.getContext("2d"); ctx.setTransform(1,0,0,1,0,0);
+  const prepared = setupCanvas(canvas, { axes: true, ...opts });
+  const traceCount = Math.max(1, result.modelTraces || result.numTraces || 1);
+  const depthMax = Math.max(1e-9, Number(result.modelDepthMax || 1));
+  const layout = plotLayout(prepared.cssW, prepared.cssH, { axes: true, ...opts });
+  const scale = {
+    traces: traceCount,
+    samples: result.modelSamples || result.numSamples || 1,
+    sampleMax: result.modelSamples || result.numSamples || 1,
+    traceStart: 0,
+    traceEnd: Math.max(1, traceCount - 1),
+    sampleStart: 0,
+    sampleEnd: result.modelSamples || result.numSamples || 1,
+    depthMax,
+    depthStep: result.depthStep || depthMax / Math.max(1, (result.modelSamples || result.numSamples || 1) - 1),
+    depthStart: 0,
+    depthEnd: depthMax,
+    distanceStep: sanitizeDistanceStep(result.distanceStep ?? result.dxM ?? result.dx, traceCount),
+    layout
+  };
+  const render = { ...prepared, layout, scale };
+  const { ctx } = render, { plot } = layout;
   const palette = [[234,215,183],[214,191,130],[183,193,138],[143,182,161],[120,149,178],[111,116,132],[68,72,87]];
-  const img = ctx.createImageData(w, h);
+  ctx.fillStyle = "#080c14";
+  ctx.fillRect(0, 0, prepared.cssW, prepared.cssH);
+  const plotW = Math.max(1, Math.floor(plot.w)), plotH = Math.max(1, Math.floor(plot.h));
+  const off = document.createElement("canvas");
+  off.width = plotW; off.height = plotH;
+  const offCtx = off.getContext("2d");
+  const img = offCtx.createImageData(plotW, plotH);
   const hzns = result.horizons || [];
-  const depthMax = result.modelDepthMax || 1;
   const hasModel = result.modelData?.length && result.modelTraces && result.modelSamples;
-  for (let y = 0; y < h; y++) {
-    const depth = y / (h - 1 || 1) * depthMax;
-    for (let x = 0; x < w; x++) {
+  for (let y = 0; y < plotH; y++) {
+    const depth = y / (plotH - 1 || 1) * depthMax;
+    for (let x = 0; x < plotW; x++) {
       let c;
       if (hasModel) {
-        const trace = Math.min(result.modelTraces - 1, Math.floor(x / Math.max(1, w) * result.modelTraces));
-        const z = Math.min(result.modelSamples - 1, Math.floor(y / Math.max(1, h) * result.modelSamples));
+        const trace = Math.min(result.modelTraces - 1, Math.floor(x / Math.max(1, plotW) * result.modelTraces));
+        const z = Math.min(result.modelSamples - 1, Math.floor(y / Math.max(1, plotH) * result.modelSamples));
         const layer = result.modelData[z * result.modelTraces + trace];
         c = layer === 255 ? [42, 48, 58] : palette[Math.min(layer, palette.length - 1)];
       } else {
         let layer = 0;
-        for (const hzn of hzns) if (depth >= horizonDepthAtCanvasX(hzn, x, w)) layer++;
+        for (const hzn of hzns) if (depth >= horizonDepthAtTrace(hzn, x / Math.max(1, plotW - 1) * (traceCount - 1), traceCount)) layer++;
         c = palette[Math.min(layer, palette.length - 1)];
       }
-      const i = (y * w + x) * 4;
+      const i = (y * plotW + x) * 4;
       img.data[i] = c[0]; img.data[i+1] = c[1]; img.data[i+2] = c[2]; img.data[i+3] = 255;
     }
   }
-  const lineColor = [16, 24, 40], lineRadius = Math.max(0, Math.round(dpr) - 1);
+  offCtx.putImageData(img, 0, 0);
+  ctx.drawImage(off, plot.x, plot.y, plot.w, plot.h);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
+  ctx.lineWidth = opts.lineWidth || 1.4;
+  ctx.strokeStyle = "rgba(12,18,30,.92)";
   for (const hzn of hzns) {
-    let prevX = -1, prevY = 0;
-    for (let x = 0; x < w; x++) {
-      const depth = horizonFiniteDepthAtCanvasX(hzn, x, w);
-      if (!Number.isFinite(depth)) { prevX = -1; continue; }
-      const y = Math.round(depth / depthMax * (h - 1));
-      if (prevX >= 0) paintImageLine(img, w, h, prevX, prevY, x, y, lineColor, lineRadius);
-      else paintImagePoint(img, w, h, x, y, lineColor, lineRadius);
-      prevX = x; prevY = y;
+    let started = false;
+    ctx.beginPath();
+    for (let x = 0; x <= plotW; x++) {
+      const trace = x / Math.max(1, plotW) * (traceCount - 1);
+      const depth = horizonDepthAtTrace(hzn, trace, traceCount);
+      if (!Number.isFinite(depth)) { started = false; continue; }
+      const px = plot.x + x / Math.max(1, plotW) * plot.w;
+      const y = depthToPlotY(depth, render);
+      if (y < plot.y - 3 || y > plot.y + plot.h + 3) { started = false; continue; }
+      started ? ctx.lineTo(px, y) : ctx.moveTo(px, y);
+      started = true;
     }
+    ctx.stroke();
   }
-  ctx.putImageData(img, 0, 0);
-  ctx.save();
-  ctx.strokeStyle = "rgba(255,255,255,.9)";
-  ctx.fillStyle = "rgba(255,255,255,.96)";
-  ctx.lineWidth = Math.max(1, dpr);
-  ctx.font = `${Math.max(10, 11 * dpr)}px Consolas`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "top";
-  ctx.strokeRect(0.5 * dpr, 0.5 * dpr, w - dpr, h - dpr);
-  for (let i = 0; i <= 5; i++) {
-    const x = i / 5 * (w - 1);
-    const trace = Math.round(i / 5 * ((result.modelTraces || result.numTraces || 1) - 1));
-    const label = Number.isFinite(result.distanceStep) ? `${(trace * result.distanceStep).toFixed(1)}m` : String(trace);
-    ctx.beginPath(); ctx.moveTo(x, h - 1); ctx.lineTo(x, h - 8 * dpr); ctx.stroke();
-    ctx.fillText(label, x, h - 18 * dpr);
-  }
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  for (let i = 0; i <= 5; i++) {
-    const y = i / 5 * (h - 1);
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(8 * dpr, y); ctx.stroke();
-    ctx.fillText(`${(i / 5 * depthMax).toFixed(1)}m`, 48 * dpr, y);
-  }
-  ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(Number.isFinite(result.distanceStep) ? "Distance (m)" : "Trace", w / 2, h - 2 * dpr);
-  ctx.save();
-  ctx.translate(14 * dpr, h / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.fillText("Depth (m)", 0, 0);
   ctx.restore();
-  ctx.restore();
+  drawPlotAxes(ctx, render, { axes: true });
+  return render;
 }
 function exportGeologyJson() {
   if (!geologyResult) return toast("请先生成自动地质模型", "warn");
@@ -2150,86 +2608,23 @@ function openGeoExport() {
 
 function exportGeoImage(format, showLines, title) {
   const result = geologyResult;
-  const w = Math.min(result.numTraces || result.modelTraces, 4000);
-  const dpr = 2;
-  const pw = w * dpr;
-  const ph = 1200 * dpr;
+  const traceCount = result.numTraces || result.modelTraces || 1;
+  const width = Math.min(1800, Math.max(900, traceCount));
+  const height = 1000;
   const canvas = document.createElement("canvas");
-  canvas.width = pw; canvas.height = ph;
-  const ctx = canvas.getContext("2d");
-  const palette = [[234,215,183],[214,191,130],[183,193,138],[143,182,161],[120,149,178],[111,116,132],[68,72,87]];
-  const hzns = result.horizons || [];
+  const exportResult = showLines ? result : { ...result, horizons: [] };
+  drawLayerModelCanvas(canvas, exportResult, { width, height, pixelRatio: 2 });
   const depthMax = result.modelDepthMax || 1;
-  const img = ctx.createImageData(pw, ph);
-  for (let y = 0; y < ph; y++) {
-    const depth = y / (ph - 1 || 1) * depthMax;
-    for (let x = 0; x < pw; x++) {
-      let layer = 0;
-      for (const hzn of hzns) {
-        const ti = Math.min(hzn.line.length - 1, Math.floor(x / pw * hzn.line.length));
-        if (depth >= hzn.line[ti]) layer++;
-      }
-      layer = Math.min(layer, palette.length - 1);
-      const c = palette[layer], i = (y * pw + x) * 4;
-      img.data[i] = c[0]; img.data[i+1] = c[1]; img.data[i+2] = c[2]; img.data[i+3] = 255;
-    }
-  }
-  if (showLines) {
-    for (const hzn of hzns) {
-      for (let x = 0; x < pw; x++) {
-        const t = Math.min(hzn.line.length - 1, Math.floor(x / pw * hzn.line.length));
-        const py = Math.round(hzn.line[t] / depthMax * (ph - 1));
-        if (py < 0 || py >= ph) continue;
-        for (let dy = -1; dy <= 1; dy++) {
-          const yy = py + dy;
-          if (yy < 0 || yy >= ph) continue;
-          const i = (yy * pw + x) * 4;
-          img.data[i] = 16; img.data[i+1] = 24; img.data[i+2] = 40;
-        }
-      }
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  ctx.save();
-  ctx.strokeStyle = "rgba(16,24,40,.9)";
-  ctx.fillStyle = "rgba(16,24,40,.96)";
-  ctx.lineWidth = 3;
-  ctx.font = "28px Consolas";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "top";
-  ctx.strokeRect(2, 2, pw - 4, ph - 4);
-  for (let i = 0; i <= 5; i++) {
-    const x = i / 5 * (pw - 1);
-    const trace = Math.round(i / 5 * ((result.numTraces || result.modelTraces || 1) - 1));
-    const label = Number.isFinite(result.distanceStep) ? `${(trace * result.distanceStep).toFixed(1)} m` : String(trace);
-    ctx.beginPath(); ctx.moveTo(x, ph - 1); ctx.lineTo(x, ph - 26); ctx.stroke();
-    ctx.fillText(label, x, ph - 58);
-  }
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  for (let i = 0; i <= 5; i++) {
-    const y = i / 5 * (ph - 1);
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(26, y); ctx.stroke();
-    ctx.fillText(`${(i / 5 * depthMax).toFixed(1)} m`, 135, y);
-  }
-  ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(Number.isFinite(result.distanceStep) ? "Distance (m)" : "Trace", pw / 2, ph - 8);
-  ctx.save();
-  ctx.translate(40, ph / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.fillText("Depth (m)", 0, 0);
-  ctx.restore();
-  ctx.restore();
   if (format === "pdf") {
     const dataUrl = canvas.toDataURL("image/png");
-    const rows = hzns.map(function(h) { return '<tr><td>'+h.name+'</td><td>'+h.medianDepth.toFixed(2)+' m</td><td>'+h.minDepth.toFixed(2)+'-'+h.maxDepth.toFixed(2)+' m</td><td>'+h.layerName+'</td><td>'+h.meaning+'</td></tr>'; }).join("");
-    const html = '<!doctype html><html><head><meta charset="utf-8"><title>'+title+'</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#1a1a1a}h1{font-size:18px;border-bottom:2px solid #2563eb;padding-bottom:8px}table{width:100%;border-collapse:collapse;margin:16px 0;font-size:12px}th,td{border:1px solid #d1d5db;padding:6px 10px}th{background:#f3f4f6}.kpis{display:flex;gap:24px;margin:10px 0;font-size:13px}img{max-width:100%}</style></head><body><h1>'+title+'</h1><div class="kpis"><span>Velocity '+result.velocity.toFixed(3)+' m/ns</span><span>eps-r '+(result.epsilonR||9).toFixed(2)+'</span><span>Depth 0-'+depthMax.toFixed(1)+' m</span><span>'+(result.numTraces||result.modelTraces)+' traces</span></div><img src="'+dataUrl+'"><h2>Horizon Interpretation</h2><table><thead><tr><th>Horizon</th><th>Median Depth</th><th>Range</th><th>Layer</th><th>Meaning</th></tr></thead><tbody>'+rows+'</tbody></table><script>print()</'+'script></body></html>';
+    const hzns = result.horizons || [];
+    const rows = hzns.map(h => `<tr><td>${escapeHtml(h.name || "")}</td><td>${axisNumber(h.medianDepth)} m</td><td>${axisNumber(h.minDepth)}-${axisNumber(h.maxDepth)} m</td><td>${escapeHtml(h.layerName || "")}</td><td>${escapeHtml(h.meaning || "")}</td></tr>`).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#1a1a1a}h1{font-size:18px;border-bottom:2px solid #2563eb;padding-bottom:8px}table{width:100%;border-collapse:collapse;margin:16px 0;font-size:12px}th,td{border:1px solid #d1d5db;padding:6px 10px}th{background:#f3f4f6}.kpis{display:flex;flex-wrap:wrap;gap:14px;margin:10px 0;font-size:13px}img{max-width:100%;border:1px solid #d1d5db}</style></head><body><h1>${escapeHtml(title)}</h1><div class="kpis"><span>Velocity ${axisNumber(result.velocity)} m/ns</span><span>eps-r ${axisNumber(result.epsilonR || 9)}</span><span>Depth 0-${axisNumber(depthMax)} m</span><span>${traceCount} traces</span></div><img src="${dataUrl}"><h2>Horizon Interpretation</h2><table><thead><tr><th>Horizon</th><th>Median Depth</th><th>Range</th><th>Layer</th><th>Meaning</th></tr></thead><tbody>${rows}</tbody></table><script>print()<\/script></body></html>`;
     const win = window.open("", "_blank");
     if (win) { win.document.write(html); win.document.close(); toast("Print dialog opened - save as PDF"); }
-    else { download(new Blob([html], { type: "text/html" }), title+".html"); toast("Popup blocked - exported HTML instead"); }
+    else { download(new Blob([html], { type: "text/html" }), `${title}.html`); toast("Popup blocked - exported HTML instead", "warn"); }
   } else {
-    canvas.toBlob(function(blob) { download(blob, title+".png"); });
+    canvas.toBlob(blob => blob && download(blob, `${title}.png`));
   }
 }
 
@@ -2339,6 +2734,9 @@ function bindUi() {
     }
     if (action === "manual-generate-model") generateManualModel();
     if (action === "manual-geo-save") saveManualGeoOutput();
+    if (action === "manual-auto-range") setManualAutoRange();
+    if (action === "manual-reset-view") resetManualView();
+    if (action === "manual-export-report") openManualExport();
     if (action === "open-trace") openFloat("trace-window");
     if (action === "open-spectrum") openFloat("spectrum-window");
     if (action === "hold-output") store.holdOutput() ? toast("Output Data 已接受为 Current Input Data") : toast("没有 Output Data", "warn");
@@ -2366,6 +2764,9 @@ function bindUi() {
   $("#geo-velocity")?.addEventListener("input", () => updateGeoDepthFromControls());
   $("#geo-depth")?.addEventListener("input", () => { $("#geo-depth").dataset.manual = "true"; });
   $("#manual-display-mode")?.addEventListener("change", () => drawManualWorkbench());
+  $("#manual-cmap")?.addEventListener("change", readManualViewControls);
+  $("#manual-min")?.addEventListener("change", readManualViewControls);
+  $("#manual-max")?.addEventListener("change", readManualViewControls);
   $("#manual-snap")?.addEventListener("change", e => { ensureManualState().snapEnabled = e.target.checked; });
   $("#colormap").onchange = e => radar.setColormap(e.target.value);
   $("#amp-min").onchange = () => radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
@@ -2390,9 +2791,26 @@ function bindUi() {
 function bindManualWorkbench() {
   const canvas = $("#manual-geo-radar-canvas");
   if (!canvas) return;
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+  canvas.addEventListener("wheel", e => {
+    const ds = currentDisplayed();
+    if (!ds) return;
+    e.preventDefault();
+    const point = manualPointFromEvent(e, false);
+    if (!point) return;
+    const factor = e.deltaY < 0 ? 0.78 : 1.28;
+    zoomManualViewAt(point, factor, e.shiftKey ? "x" : (e.ctrlKey ? "y" : "both"));
+  }, { passive: false });
   canvas.addEventListener("mousedown", e => {
     const ds = currentDisplayed();
     if (!ds) return;
+    const rawPoint = manualPointFromEvent(e, false);
+    const panRequested = e.button === 1 || e.button === 2 || e.altKey || (manualGeoTool === "drag" && rawPoint && !nearestManualPoint(rawPoint, 18));
+    if (panRequested && rawPoint) {
+      const view = { ...ensureManualView(ds) };
+      manualGeoDrag = { type: "pan", x: e.clientX, y: e.clientY, view };
+      return;
+    }
     const point = manualPointFromEvent(e);
     if (!point) return;
     const st = ensureManualState();
@@ -2428,12 +2846,18 @@ function bindManualWorkbench() {
     drawManualWorkbench();
   });
   canvas.addEventListener("mousemove", e => {
+    if (manualGeoDrag?.type === "pan") {
+      panManualView(manualGeoDrag.view, e.clientX - manualGeoDrag.x, e.clientY - manualGeoDrag.y);
+      return;
+    }
+    const rawPoint = manualPointFromEvent(e, false);
+    if (!rawPoint) return;
+    const st = ensureManualState();
+    st.cursorTrace = rawPoint.traceIndex;
+    drawManualTraceAndSpectrum(rawPoint.traceIndex);
+    if (!manualGeoDrag) return;
     const point = manualPointFromEvent(e);
     if (!point) return;
-    const st = ensureManualState();
-    st.cursorTrace = point.traceIndex;
-    drawManualTraceAndSpectrum(point.traceIndex);
-    if (!manualGeoDrag) return;
     if (manualGeoDrag.type === "draw") addManualPoint(manualGeoDrag.layer, point, 1);
     if (manualGeoDrag.type === "drag") {
       manualGeoDrag.layer.points[manualGeoDrag.index] = point;
