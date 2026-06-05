@@ -2,15 +2,27 @@ import { RECORD_SIZE, SAMPLES_PER_TRACE, parse2BFile, write2BFile, writeMgpJson,
 import { HCD_DEFAULT_AMP, parseHadText, parseHcdFile } from "./io/hcd.js";
 import { IpdStore } from "./processing/ipdStore.js";
 import { depthAxisFromVofh, parseVofh, spectrum, fkSpectrum } from "./processing/algorithms.js";
+import { pickPeaksNearPoint, traceFromSeed, snapPointToPeak } from "./processing/peakTracking.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
+import { DEFAULT_MODEL_MATERIALS, manualHorizonsToModel, normalizeObject } from "./modeling/model2d.js";
+import { MATERIAL_PRESETS } from "./modeling/materials.js";
+import { variablesFromCurrentDataset, variablesFromForwardResult, writeMatFile } from "./io/mat.js";
+import { parseMatFileAsync } from "./io/mat-reader.js";
+import { readTheme } from "./theme.js";
 
+let canvasTheme = readTheme();
 const store = new IpdStore();
 const worker = new Worker(new URL("./workers/processingWorker.js", import.meta.url), { type: "module" });
 const pending = new Map();
 let displaySource = "current";
 let threeVolume = null;
 let velocityPoints = [];
-let model = { background: { epsr: 9, sigma: 0, mu: 1 }, objects: [] };
+let model = { background: { epsr: 9, sigma: 0.0005, mu: 1 }, layerMaterials: DEFAULT_MODEL_MATERIALS, objects: [] };
+let model2dResult = null;
+let model2dDirty = true;
+let fdtdForwardResult = null;
+let selectedModelObjectId = "";
+let modelDrag = null;
 let modelTool = "select";
 let radarSelections = [];
 let radarAnnotations = [];
@@ -69,6 +81,21 @@ const radar = new RadarRenderer($("#radar-canvas"), $("#radar-wrap"), (t, s, amp
   $("#cursor-status").textContent = t == null ? "" : `道 ${t} · ${y} · 振幅 ${amp.toFixed(5)}`;
   if (t != null) syncTraceIndex(t, false);
 });
+radar.setTheme(canvasTheme);
+
+/* keep canvas theme in sync with the inline toggle script */
+new MutationObserver(() => {
+  canvasTheme = readTheme();
+  radar.setTheme(canvasTheme);
+  /* re-render any visible page */
+  $$(".page.active").forEach(p => {
+    if (p.id === "page-radar")       { radar.render(); refresh(); }
+    if (p.id === "page-velocity")    { velocityRenderer?.setTheme(canvasTheme); renderVelocity(); }
+    if (p.id === "page-model")       renderModel();
+    if (p.id === "page-geo-modeling") drawGeologyResult();
+    if (p.id === "page-manual-geo")  drawManualWorkbench();
+  });
+}).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
 radar.callbacks = {
   onSelection(sel) {
@@ -109,14 +136,20 @@ function download(blob, name) {
 function runWorker(op, dataset, params = {}) {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    const copy = new Float32Array(dataset.data);
+    pending.set(id, { resolve, reject, op });
+    const needsDatasetData = op !== "fdtd-tm2d" && op !== "fdtd-te2d";
+    const copy = needsDatasetData ? new Float32Array(dataset.data) : new Float32Array(0);
     worker.postMessage({ id, op, params: normalizeWorkerParams(dataset, params), dataset: { ...dataset, data: copy.buffer } }, [copy.buffer]);
   });
 }
 worker.onmessage = ({ data }) => {
   const p = pending.get(data.id);
   if (!p) return;
+  if (data.progress) {
+    const pct = Math.max(0, Math.min(100, Math.round((data.detail?.progress || 0) * 100)));
+    $("#footer-status").textContent = `${p.op.toUpperCase()} ${pct}%`;
+    return;
+  }
   pending.delete(data.id);
   data.ok ? p.resolve(data.result) : p.reject(new Error(data.error));
 };
@@ -404,16 +437,52 @@ async function readHcdImport(hcdFile, hadFile = null) {
   const params = parseHadText(await hadFile.text());
   finishImport(parseHcdFile(await hcdFile.arrayBuffer(), params), hcdFile);
 }
+async function readMatImport(file) {
+  $("#footer-status").textContent = "正在解析 " + file.name;
+  var buf = await file.arrayBuffer();
+  var variables = await parseMatFileAsync(buf);
+  var candidates = Object.entries(variables).filter(function(e) { var v = e[1]; return v && typeof v === "object" && v.data instanceof Float32Array; });
+  if (!candidates.length) throw new Error("MAT files without float32 matrix are not supported.");
+  var best = null, bestSize = 0;
+  for (var ci = 0; ci < candidates.length; ci++) {
+    var v = candidates[ci][1], sz = v.rows * v.cols;
+    if (sz > bestSize) { bestSize = sz; best = { name: candidates[ci][0], value: v }; }
+  }
+  var data = new Float32Array(best.value.data), numSamples, numTraces;
+  if (best.value.rows > 1 && best.value.cols > 1) {
+    numSamples = best.value.rows; numTraces = best.value.cols;
+    var transposed = new Float32Array(numTraces * numSamples);
+    for (var t2 = 0; t2 < numTraces; t2++) for (var s2 = 0; s2 < numSamples; s2++) transposed[t2 * numSamples + s2] = data[s2 + t2 * numSamples];
+    finishImport({ data: transposed, meta: matMeta(variables, numTraces, numSamples, file.name), numTraces: numTraces, numSamples: numSamples, name: file.name }, file);
+  } else {
+    numSamples = best.value.rows * best.value.cols; numTraces = 1;
+    finishImport({ data: data, meta: matMeta(variables, numTraces, numSamples, file.name), numTraces: numTraces, numSamples: numSamples, name: file.name }, file);
+  }
+}
+function matMeta(vars, numTraces, numSamples, fileName) {
+  var dt = (vars.dt_ns && vars.dt_ns.data && vars.dt_ns.data[0]) || 0.3125;
+  var dx = (vars.dx_m && vars.dx_m.data && vars.dx_m.data[0]) || 0.05;
+  var v = (vars.velocity_m_ns && vars.velocity_m_ns.data && vars.velocity_m_ns.data[0]) || 0.1;
+  var rp = { dtNs: dt, dxM: dx, velocityMPerNs: v, epsilonR: (0.299792458 / v) * (0.299792458 / v), vofhText: v + ",0" };
+  if (vars.time_array_ns && vars.time_array_ns.data && vars.time_array_ns.data.length > 1) {
+    var tArr = vars.time_array_ns.data;
+    rp.dtNs = Math.abs(tArr[1] - tArr[0]) || dt;
+    rp.timeZeroSample = 0;
+  }
+  return { sourceFormat: ".MAT", radarParams: rp, headerSuggestions: { sourceFormat: ".MAT", dtNs: dt, dxM: dx } };
+}
+
 
 async function importFiles(files) {
   const list = Array.from(files || []);
   const groups = new Map();
   for (const file of list) {
     const ext = fileExt(file.name);
-    if (![".2b", ".hcd", ".had"].includes(ext)) {
+    if (![".2b", ".hcd", ".had", ".mat"].includes(ext)) {
       toast(`${file.name} 暂不支持导入`, "warn");
       continue;
     }
+    if (ext === ".mat") { try { await readMatImport(file); } catch (error) { toast(file.name + ": " + error.message, "err"); } continue; }
     const stem = fileStem(file.name);
     const group = groups.get(stem) || {};
     if (ext === ".2b") group.twoB = file;
@@ -733,7 +802,7 @@ function openFkDesigner() {
     const w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
     cv.width = w * dpr; cv.height = h * dpr; cv.style.width = `${w}px`; cv.style.height = `${h}px`;
     const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
-    ctx.fillStyle = "#080c14"; ctx.fillRect(0,0,w,h);
+    ctx.fillStyle = canvasTheme.bg0; ctx.fillRect(0,0,w,h);
     if (spec) {
       const img = ctx.createImageData(w, h);
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -751,7 +820,7 @@ function openFkDesigner() {
     if (!spec) return;
     const mode = $("#fk-mode").value;
     if (mode === "polygon" && points.length) {
-      ctx.strokeStyle = "#fff200"; ctx.fillStyle = "rgba(255,242,0,.12)"; ctx.lineWidth = 2;
+      ctx.strokeStyle = canvasTheme.gold; ctx.fillStyle = "rgba(201,169,110,0.12)"; ctx.lineWidth = 2;
       ctx.beginPath();
       points.forEach((pt, i) => {
         const q = toCanvas(pt);
@@ -761,18 +830,18 @@ function openFkDesigner() {
       ctx.fill(); ctx.stroke();
       for (const pt of points) {
         const q = toCanvas(pt);
-        ctx.beginPath(); ctx.arc(q.x, q.y, 5, 0, Math.PI * 2); ctx.fillStyle = "#fff200"; ctx.fill();
+        ctx.beginPath(); ctx.arc(q.x, q.y, 5, 0, Math.PI * 2); ctx.fillStyle = canvasTheme.gold; ctx.fill();
       }
     } else if (mode === "velocity-fan") {
       const vmin = Number($("#fk-vmin").value || 0.03), vmax = Number($("#fk-vmax").value || 0.3);
-      ctx.strokeStyle = "#fff200"; ctx.lineWidth = 2;
+      ctx.strokeStyle = canvasTheme.gold; ctx.lineWidth = 2;
       for (const v of [vmin, vmax, -vmin, -vmax]) {
         const kEdge = Math.sign(v) * Math.min(spec?.kMax || 1, (spec?.fMaxGHz || 1) / Math.abs(v));
         const a = toCanvas({ k: 0, f: 0 }), b = toCanvas({ k: kEdge, f: Math.abs(kEdge * v) });
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
       }
     } else if (mode === "up-dip" || mode === "down-dip") {
-      ctx.strokeStyle = "#fff200"; ctx.lineWidth = 2;
+      ctx.strokeStyle = canvasTheme.gold; ctx.lineWidth = 2;
       ctx.beginPath();
       if (mode === "up-dip") { ctx.moveTo(0, 0); ctx.lineTo(w, h); }
       else { ctx.moveTo(w, 0); ctx.lineTo(0, h); }
@@ -876,7 +945,7 @@ function drawTrace() {
   const tr = ds.data.subarray(t * ds.numSamples, t * ds.numSamples + ds.numSamples);
   let rms = 0; for (const v of tr) rms += v * v; rms = Math.sqrt(rms / tr.length);
   $("#trace-stats").textContent = `RMS ${rms.toFixed(4)} · Max ${Math.max(...tr).toFixed(4)} · Min ${Math.min(...tr).toFixed(4)}`;
-  drawLine($("#trace-canvas"), [...tr], { title: `Trace ${t}` });
+  drawLine($("#trace-canvas"), [...tr], { title: `Trace ${t}` }, canvasTheme);
   radar.setCurrentTrace(t);
 }
 function drawSpectrum(mean = false) {
@@ -890,7 +959,7 @@ function drawSpectrum(mean = false) {
   } else sp = spectrum(ds.data.subarray(t * ds.numSamples, t * ds.numSamples + ds.numSamples));
   let peak = 0, pi = 0; sp.forEach((v, i) => { if (v > peak) { peak = v; pi = i; } });
   $("#spectrum-stats").textContent = `Peak bin ${pi} · ${peak.toExponential(2)}`;
-  drawLine($("#spectrum-canvas"), [...sp], { title: mean ? "Mean Trace Spectrum" : `Trace ${t} Spectrum`, color: "#00b42a" });
+  drawLine($("#spectrum-canvas"), [...sp], { title: mean ? "Mean Trace Spectrum" : `Trace ${t} Spectrum`, color: canvasTheme.ok }, canvasTheme);
   radar.setCurrentTrace(t);
 }
 
@@ -901,7 +970,7 @@ function renderVelocity() {
   if ($("#vel-dt")) $("#vel-dt").value = rp.dtNs.toFixed(4);
   if ($("#vel-dx")) $("#vel-dx").value = rp.dxM.toFixed(4);
   if ($("#vel-v")) $("#vel-v").value = rp.velocityMPerNs.toFixed(3);
-  if (!velocityRenderer || velocityRenderer.canvas !== cv) velocityRenderer = new RadarRenderer(cv, cv.parentElement);
+  if (!velocityRenderer || velocityRenderer.canvas !== cv) { velocityRenderer = new RadarRenderer(cv, cv.parentElement); velocityRenderer.setTheme(canvasTheme); }
   const rr = velocityRenderer;
   rr.setDataset(ds);
   let redrawFrame = 0;
@@ -916,7 +985,7 @@ function renderVelocity() {
     if (!point || !rr.view) return;
     const p = rr.plot(), ctx = rr.ctx, params = currentParams(point);
     const alpha = 2 * params.dx / Math.max(params.v * params.dt, 1e-9);
-    const color = opts.color || "#fff200";
+    const color = opts.color || canvasTheme.gold;
     const startT = Math.max(0, Math.floor(rr.view.t0));
     const endT = Math.min(ds.numTraces - 1, Math.ceil(rr.view.t1));
     const strokePath = () => {
@@ -949,9 +1018,9 @@ function renderVelocity() {
   const redraw = () => {
     rr.render();
     const inputPoint = { x0: Number($("#vel-x0").value), z0: Number($("#vel-z0").value) };
-    if (velocityFixedPoint) drawHyperbola(velocityFixedPoint, { color: "#fff200", width: 3.4, glow: 14 });
-    if (velocityPreviewPoint) drawHyperbola(velocityPreviewPoint, { color: "#00f5ff", width: 2.8, glow: 10, dashed: true });
-    if (!velocityFixedPoint && !velocityPreviewPoint) drawHyperbola(inputPoint, { color: "#fff200", width: 3.2, glow: 12 });
+    if (velocityFixedPoint) drawHyperbola(velocityFixedPoint, { color: canvasTheme.gold, width: 3.4, glow: 14 });
+    if (velocityPreviewPoint) drawHyperbola(velocityPreviewPoint, { color: canvasTheme.gold, width: 2.8, glow: 10, dashed: true });
+    if (!velocityFixedPoint && !velocityPreviewPoint) drawHyperbola(inputPoint, { color: canvasTheme.gold, width: 3.2, glow: 12 });
   };
   const scheduleRedraw = () => {
     cancelAnimationFrame(redrawFrame);
@@ -997,14 +1066,14 @@ function updateVelocityList() {
   }).join("") : "暂无速度点";
 }
 
-function renderModel() {
+function renderLegacyPixelModel() {
   const cv = $("#model-canvas"), rect = cv.parentElement.getBoundingClientRect(), dpr = devicePixelRatio || 1;
   cv.width = rect.width * dpr; cv.height = rect.height * dpr; const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.fillStyle = "#0d1219"; ctx.fillRect(0,0,rect.width,rect.height);
-  ctx.strokeStyle = "#28364a"; for (let x=0;x<rect.width;x+=24){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,rect.height);ctx.stroke();} for(let y=0;y<rect.height;y+=24){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(rect.width,y);ctx.stroke();}
+  ctx.fillStyle = canvasTheme.bg1; ctx.fillRect(0,0,rect.width,rect.height);
+  ctx.strokeStyle = canvasTheme.t3; for (let x=0;x<rect.width;x+=24){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,rect.height);ctx.stroke();} for(let y=0;y<rect.height;y+=24){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(rect.width,y);ctx.stroke();}
   model.objects.forEach(o => {
-    ctx.fillStyle = o.type === "circle" ? "rgba(77,139,255,.35)" : "rgba(255,176,32,.35)";
-    ctx.strokeStyle = "#eaf0f8";
+    ctx.fillStyle = o.type === "circle" ? "rgba(201,169,110,.28)" : "rgba(201,169,110,.28)";
+    ctx.strokeStyle = canvasTheme.t0;
     if (o.type === "circle") { ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, Math.PI*2); ctx.fill(); ctx.stroke(); }
     else { ctx.beginPath(); o.points.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.closePath(); ctx.fill(); ctx.stroke(); }
   });
@@ -1054,6 +1123,7 @@ function clearInteractionState() {
   manualInterpretationState = null;
   manualFeatureResult = null;
   manualModelResult = null;
+  markModel2dDirty();
   radar.setSelections([]);
   radar.setAnnotations([]);
   updateSelectionPanel();
@@ -1437,7 +1507,7 @@ function drawPlotAxes(ctx, render, opts = {}) {
   const ticksY = plot.h < 180 ? 3 : 5;
   ctx.save();
   ctx.strokeStyle = "rgba(238,246,255,.82)";
-  ctx.fillStyle = "#f8fcff";
+  ctx.fillStyle = canvasTheme.t0;
   ctx.lineWidth = 1.1;
   ctx.font = `${plot.w < 260 ? 10 : 11}px Consolas, monospace`;
   ctx.shadowColor = "rgba(0,0,0,.55)";
@@ -1480,7 +1550,7 @@ function drawPlotAxes(ctx, render, opts = {}) {
     }
     ctx.strokeStyle = "rgba(238,246,255,.65)";
     ctx.strokeRect(bx, by, bw, bh);
-    ctx.fillStyle = "#f8fcff";
+    ctx.fillStyle = canvasTheme.t0;
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.fillText(axisNumber(opts.max ?? 1), bx + bw + 5, by);
@@ -1510,7 +1580,7 @@ function renderDatasetCanvas(canvas, ds, opts = {}) {
   const render = { ...prepared, layout, scale: datasetPlotScale(ds, opts, layout) };
   const { ctx } = render, { plot } = layout;
   const min = Number(opts.min ?? -10), max = Number(opts.max ?? 10), range = max - min || 1;
-  ctx.fillStyle = opts.background || "#080c14";
+  ctx.fillStyle = opts.background || canvasTheme.bg0;
   ctx.fillRect(0, 0, prepared.cssW, prepared.cssH);
   const plotW = Math.max(1, Math.floor(plot.w)), plotH = Math.max(1, Math.floor(plot.h));
   const off = document.createElement("canvas");
@@ -1535,7 +1605,7 @@ function renderDatasetCanvas(canvas, ds, opts = {}) {
     ctx.rect(plot.x, plot.y, plot.w, plot.h);
     ctx.clip();
     ctx.lineWidth = 1.3; ctx.setLineDash([5,3]);
-    const colors = ["#ffe066","#69db7c","#74c0fc","#ff922b","#da77f2","#63e6be"];
+    const colors = getHorizonLineColors();
     opts.horizons.forEach((hzn, i) => {
       ctx.strokeStyle = colors[i % colors.length]; ctx.beginPath();
       let started = false;
@@ -1558,7 +1628,7 @@ function renderDatasetCanvas(canvas, ds, opts = {}) {
     ctx.save();
     ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
     ctx.lineWidth = 1.2;
-    ctx.strokeStyle = "#63e6be";
+    ctx.strokeStyle = canvasTheme.ok;
     ctx.setLineDash([7, 5]);
     for (const c of opts.clusters) {
       const depth = Number(c.depth ?? c.meanDepth ?? c.medianDepth);
@@ -1572,7 +1642,7 @@ function renderDatasetCanvas(canvas, ds, opts = {}) {
   if (opts.peaks?.length) {
     ctx.save();
     ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
-    ctx.fillStyle = "#fff200";
+    ctx.fillStyle = canvasTheme.gold;
     ctx.strokeStyle = "rgba(2,8,18,.85)";
     const stride = Math.max(1, Math.ceil(opts.peaks.length / 2500));
     for (let i = 0; i < opts.peaks.length; i += stride) {
@@ -1632,6 +1702,7 @@ async function runGeologyModel() {
   $("#footer-status").textContent = "正在自动提取界面并生成地质模型";
   try {
     geologyResult = await runWorker("geology-model", ds, params);
+    markModel2dDirty();
     store.setOutput({
       data: geologyResult.data,
       numTraces: geologyResult.numTraces,
@@ -1762,26 +1833,26 @@ function drawGeoStepHistogram(result) {
   const dpr = devicePixelRatio || 1, w = Math.max(1, Math.floor(rect.width)), h = Math.max(1, Math.floor(rect.height));
   canvas.width = w * dpr; canvas.height = h * dpr; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
   const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = "#080c14"; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = canvasTheme.bg0; ctx.fillRect(0, 0, w, h);
   if (!result.histogram?.length) {
-    ctx.fillStyle = "#91a7c7"; ctx.font = "12px Consolas"; ctx.fillText("Histogram appears after depth histogram / clustering steps.", 14, 24);
+    ctx.fillStyle = canvasTheme.t2; ctx.font = "12px Consolas"; ctx.fillText("Histogram appears after depth histogram / clustering steps.", 14, 24);
     return;
   }
   const hist = result.histogram;
   const max = Math.max(...hist) || 1;
   const m = { l: 54, r: 12, t: 14, b: 28 };
   ctx.strokeStyle = "rgba(248,252,255,.45)";
-  ctx.fillStyle = "#f8fcff";
+  ctx.fillStyle = canvasTheme.t0;
   ctx.font = "11px Consolas";
   ctx.strokeRect(m.l, m.t, w - m.l - m.r, h - m.t - m.b);
   for (let i = 0; i < hist.length; i++) {
     const x0 = m.l + i / hist.length * (w - m.l - m.r);
     const x1 = m.l + (i + 1) / hist.length * (w - m.l - m.r);
     const bh = hist[i] / max * (h - m.t - m.b);
-    ctx.fillStyle = "#74c0fc";
+    ctx.fillStyle = canvasTheme.gold;
     ctx.fillRect(x0 + 1, h - m.b - bh, Math.max(1, x1 - x0 - 2), bh);
   }
-  ctx.fillStyle = "#f8fcff";
+  ctx.fillStyle = canvasTheme.t0;
   ctx.textAlign = "center";
   ctx.fillText("Depth histogram", w / 2, h - 8);
   ctx.textAlign = "right";
@@ -1789,7 +1860,12 @@ function drawGeoStepHistogram(result) {
 }
 
 const GEO_LABELS_SAFE = ["layer 1", "layer 2", "layer 3", "layer 4", "layer 5", "layer 6", "unclassified"];
-const manualLayerColors = ["#ffe066", "#74c0fc", "#63e6be", "#ff922b", "#da77f2", "#69db7c", "#ff6b6b", "#91a7ff"];
+function getManualLayerColors() {
+  return ["#D4BF90", "#B8A088", "#A0A878", "#9A8CB8", "#C08880", "#88A0A8", "#C08078", "#90A090"];
+}
+function getHorizonLineColors() {
+  return ["#D4BF90", "#C9A96E", "#B8A088", "#A0906E", "#908060", "#C9A96E"];
+}
 
 function finiteMean(values) {
   let sum = 0, n = 0;
@@ -1839,7 +1915,7 @@ function createManualLayer(source = "manual") {
   const st = ensureManualState();
   pushManualHistory();
   const id = `H${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`;
-  const layer = { id, name: `H${st.layers.length + 1}`, color: manualLayerColors[st.layers.length % manualLayerColors.length], type: "horizon", points: [], visible: true, locked: false, source, confidence: source === "auto" ? 70 : 100, metadata: {} };
+  const layer = { id, name: `H${st.layers.length + 1}`, color: getManualLayerColors()[st.layers.length % getManualLayerColors().length], type: "horizon", points: [], visible: true, locked: false, source, confidence: source === "auto" ? 70 : 100, metadata: {} };
   st.layers.push(layer);
   st.activeLayerId = id;
   renderManualLayerList();
@@ -2175,8 +2251,8 @@ function drawManualTraceAndSpectrum(traceIndex = 0) {
   if (!ds) return;
   const t = Math.max(0, Math.min(ds.numTraces - 1, Math.round(traceIndex)));
   const trace = ds.data.subarray(t * ds.numSamples, t * ds.numSamples + ds.numSamples);
-  drawLine($("#manual-geo-chart-canvas"), [...trace], { title: `Trace ${t}` });
-  drawLine($("#manual-geo-spectrum-canvas"), [...spectrum(trace)], { title: `Spectrum ${t}`, color: "#63e6be" });
+  drawLine($("#manual-geo-chart-canvas"), [...trace], { title: `Trace ${t}` }, canvasTheme);
+  drawLine($("#manual-geo-spectrum-canvas"), [...spectrum(trace)], { title: `Spectrum ${t}`, color: canvasTheme.ok }, canvasTheme);
 }
 
 async function computeManualAids() {
@@ -2198,7 +2274,7 @@ async function importAutoHorizonsToManual() {
   pushManualHistory();
   const stride = Math.max(1, Math.floor(ds.numTraces / 180));
   for (const h of geologyResult.horizons || []) {
-    const layer = { id: `A${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`, name: `${h.name}-auto`, color: manualLayerColors[st.layers.length % manualLayerColors.length], type: "horizon", points: [], visible: true, locked: false, source: "auto", confidence: h.meanConfidence || 70, metadata: { importedFromAuto: true } };
+    const layer = { id: `A${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`, name: `${h.name}-auto`, color: getManualLayerColors()[st.layers.length % getManualLayerColors().length], type: "horizon", points: [], visible: true, locked: false, source: "auto", confidence: h.meanConfidence || 70, metadata: { importedFromAuto: true } };
     for (let t = 0; t < ds.numTraces; t += stride) {
       const sampleIndex = Math.max(0, Math.min(ds.numSamples - 1, Math.round((h.line[t] || 0) / manualDepthStep(ds))));
       layer.points.push(enrichManualPoint({ traceIndex: t, sampleIndex, source: "auto", snapScore: (h.confidence?.[t] || 0) / 100 }, ds));
@@ -2281,6 +2357,7 @@ function generateManualModel() {
     }
   }
   manualModelResult = { data: ds.data, numTraces: ds.numTraces, numSamples: ds.numSamples, modelData, uncertaintyData, modelTraces: ds.numTraces, modelSamples, modelDepthMax: depthMax, depthStep: depthMax / Math.max(1, modelSamples - 1), distanceStep: rp.dxM, velocity: rp.velocityMPerNs, epsilonR: rp.epsilonR, horizons, layerNames: GEO_LABELS_SAFE, source: "manual" };
+  markModel2dDirty();
   drawManualWorkbench();
   drawManualModelWindow();
   $("#manual-geo-report").innerHTML = `<b>Manual model generated 手动模型已生成</b><p>${horizons.length} 条人工层位；人工线优先，短缺口已插值，长缺口标为未解释。</p>`;
@@ -2319,8 +2396,8 @@ function drawManualModelWindow() {
     const rect = canvas.getBoundingClientRect?.() || { width: 600, height: 360 };
     const w = Math.max(1, Math.floor(rect.width || 600)), h = Math.max(1, Math.floor(rect.height || 360));
     canvas.width = w; canvas.height = h; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
-    ctx.fillStyle = "#080c14"; ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = "#91a7c7"; ctx.font = "13px Consolas"; ctx.fillText("Generate a manual model first.", 18, 30);
+    ctx.fillStyle = canvasTheme.bg0; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = canvasTheme.t2; ctx.font = "13px Consolas"; ctx.fillText("Generate a manual model first.", 18, 30);
     return;
   }
   const ds = currentDisplayed();
@@ -2552,7 +2629,7 @@ function drawLayerModelCanvas(canvas, result, opts = {}) {
   const render = { ...prepared, layout, scale };
   const { ctx } = render, { plot } = layout;
   const palette = [[234,215,183],[214,191,130],[183,193,138],[143,182,161],[120,149,178],[111,116,132],[68,72,87]];
-  ctx.fillStyle = "#080c14";
+  ctx.fillStyle = canvasTheme.bg0;
   ctx.fillRect(0, 0, prepared.cssW, prepared.cssH);
   const plotW = Math.max(1, Math.floor(plot.w)), plotH = Math.max(1, Math.floor(plot.h));
   const off = document.createElement("canvas");
@@ -2691,6 +2768,15 @@ function exportData(kind) {
   } catch (e) { toast(e.message, "err"); }
 }
 
+function convertToMat() {
+  var ds = store.current;
+  if (!ds) return toast("Please import data first.", "warn");
+  try {
+    download(new Blob([writeMatFile(variablesFromCurrentDataset(ds))], { type: "application/octet-stream" }), (ds.name || "data").replace(/\.[^.]+$/i, "") + ".mat");
+    toast(".mat export completed.");
+  } catch (e) { toast(e.message, "err"); }
+}
+
 function bindUi() {
   $("#file-input").onchange = e => importFiles(e.target.files);
   $("#drop-zone").onclick = () => $("#file-input").click();
@@ -2780,6 +2866,7 @@ function bindUi() {
     if (action === "open-undo") openUndo();
     if (action === "save-mgp") exportData("mgp");
     if (action === "save-depth") exportData("depth");
+    if (action === "convert-mat") convertToMat();
     if (action === "show-instant") openProcess("instantaneous");
     if (action === "show-centroid") computeSpecial("centroid", "质心频率");
     if (action === "show-attenuation") computeAttenuation();
@@ -2792,7 +2879,11 @@ function bindUi() {
     if (action === "create-3d") create3D();
     if (action === "save-report") download(new Blob([JSON.stringify({ velocityPoints, model }, null, 2)], {type:"application/json"}), "interpretation-report.json");
     if (e.target.dataset.close) $(`#${e.target.dataset.close}`).classList.remove("show");
-    if (e.target.dataset.modelTool) { modelTool = e.target.dataset.modelTool; toast(`建模工具：${modelTool}`); }
+    if (e.target.dataset.modelTool) {
+      modelTool = e.target.dataset.modelTool;
+      $$("[data-model-tool]").forEach(btn => btn.classList.toggle("active", btn.dataset.modelTool === modelTool));
+      toast(`建模工具：${modelTool}`);
+    }
   });
   $("#display-mode").onchange = e => { displaySource = e.target.value; refresh(); syncExportControls(); };
   $("#export-source") && ($("#export-source").onchange = () => syncExportControls());
@@ -2804,6 +2895,7 @@ function bindUi() {
   $("#manual-min")?.addEventListener("change", readManualViewControls);
   $("#manual-max")?.addEventListener("change", readManualViewControls);
   $("#manual-snap")?.addEventListener("change", e => { ensureManualState().snapEnabled = e.target.checked; });
+  $("#manual-pick-radius")?.addEventListener("input", () => drawManualWorkbench());
   $("#colormap").onchange = e => radar.setColormap(e.target.value);
   $("#amp-min").onchange = () => radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
   $("#amp-max").onchange = () => radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
@@ -2818,8 +2910,21 @@ function bindUi() {
     const p = { v: Number($("#vel-v").value), x0: Number($("#vel-x0").value), z0: Number($("#vel-z0").value) };
     velocityPoints.push(p); updateVelocityList(); toast("速度点已保存");
   };
-  $("#model-export").onclick = () => download(new Blob([JSON.stringify(model, null, 2)], {type:"application/json"}), "lpr-model.json");
-  $("#model-velocity").onclick = () => toast("2-D 速度场已生成入口：后续偏移将读取该模型。");
+  $("#model-export").onclick = () => download(new Blob([JSON.stringify({ ...model, model2d: model2dResult || rebuildModel2d() }, null, 2)], {type:"application/json"}), "lpr-model.json");
+  $("#model-build") && ($("#model-build").onclick = buildModel2dOutput);
+  $("#model-fdtd-tm") && ($("#model-fdtd-tm").onclick = () => forwardModel("tm"));
+  $("#model-fdtd-te") && ($("#model-fdtd-te").onclick = () => forwardModel("te"));
+  $("#model-export-mat") && ($("#model-export-mat").onclick = exportModelMat);
+  $("#model-export-png") && ($("#model-export-png").onclick = exportModelPng);
+  ["model-epsr","model-sigma","model-mu","model-traces","model-depth-samples","model-depth-max","model-dx"].forEach(id => $(`#${id}`)?.addEventListener("change", () => { markModel2dDirty(); renderModel(); }));
+  ["model-object-type","model-object-x","model-object-z","model-object-width","model-object-height","model-object-radius","model-object-epsr","model-object-sigma","model-object-mu"].forEach(id => $(`#${id}`)?.addEventListener("change", updateSelectedModelObject));
+  $("#model-velocity").onclick = () => {
+    const result = rebuildModel2d();
+    const velocity = new Float32Array(result.epsrField.length);
+    for (let i = 0; i < velocity.length; i++) velocity[i] = 0.299792458 / Math.sqrt(Math.max(1e-9, result.epsrField[i]));
+    store.setOutput({ data: velocity, numTraces: result.nx, numSamples: result.nz, name: "model2d_velocity", meta: { ...(store.current?.meta || {}), verticalAxisKind: "depth", depthAxisM: result.depthAxisM, distanceAxisM: result.distanceAxisM }, model2d: result }, { name:"2-D velocity field", op:"model-velocity", params: currentModelOptions() });
+    displaySource = "output"; $("#display-mode").value = "output"; refresh(); toast("2-D velocity field generated.");
+  };
   $("#three-axis").onchange = renderThree; $("#three-index").oninput = renderThree;
   bindModel();
   bindManualWorkbench();
@@ -2848,7 +2953,7 @@ function bindManualWorkbench() {
       manualGeoDrag = { type: "pan", x: e.clientX, y: e.clientY, view };
       return;
     }
-    const point = manualPointFromEvent(e);
+    const point = manualGeoTool === "draw" ? rawPoint : manualPointFromEvent(e);
     if (!point) return;
     const st = ensureManualState();
     st.cursorTrace = point.traceIndex;
@@ -2878,7 +2983,8 @@ function bindManualWorkbench() {
     if (layer.source === "auto") st.activeLayerId = createManualLayer("manual").id;
     const target = activeManualLayer();
     pushManualHistory();
-    addManualPoint(target, point, manualGeoTool === "draw" ? 1 : 0);
+    if (manualGeoTool === "draw") addManualBrushPoints(target, point);
+    else addManualPoint(target, point, 0);
     manualGeoDrag = manualGeoTool === "draw" ? { type: "draw", layer: target } : null;
     drawManualWorkbench();
   });
@@ -2893,9 +2999,9 @@ function bindManualWorkbench() {
     st.cursorTrace = rawPoint.traceIndex;
     drawManualTraceAndSpectrum(rawPoint.traceIndex);
     if (!manualGeoDrag) return;
-    const point = manualPointFromEvent(e);
+    const point = manualGeoDrag.type === "draw" ? rawPoint : manualPointFromEvent(e);
     if (!point) return;
-    if (manualGeoDrag.type === "draw") addManualPoint(manualGeoDrag.layer, point, 1);
+    if (manualGeoDrag.type === "draw") addManualBrushPoints(manualGeoDrag.layer, point);
     if (manualGeoDrag.type === "drag") {
       manualGeoDrag.layer.points[manualGeoDrag.index] = point;
       sortLayerPoints(manualGeoDrag.layer);
@@ -2940,7 +3046,7 @@ async function computeAttenuation() {
     store.setOutput({ ...result, name: `${ds.name || "data"}_attenuation` }, { name: "Attenuation Analysis", op: "attenuation-analysis", params: {} });
     displaySource = "output"; $("#display-mode").value = "output";
     openFloat("trace-window");
-    drawLine($("#trace-canvas"), [...result.data.slice(0, result.numSamples)], { title:"Median instantaneous power", color:"#ffb020" });
+    drawLine($("#trace-canvas"), [...result.data.slice(0, result.numSamples)], { title:"Median instantaneous power", color:canvasTheme.wn }, canvasTheme);
     $("#trace-stats").textContent = `power-law t^${result.powerLaw?.[1]?.toFixed?.(3) ?? "?"} · exp ${result.exponential?.[1]?.toFixed?.(3) ?? "?"}`;
     $("#footer-status").textContent = "衰减特征已生成 Output Data";
     toast("Attenuation Analysis 已生成 Output Data");
@@ -2963,6 +3069,341 @@ function forwardModel() {
   store.setOutput({ data, numTraces:nt, numSamples:ns, name:"forward_model" }, { name:"正演模拟", op:"forward", params:{objects:model.objects.length} });
   displaySource = "output"; $("#display-mode").value = "output"; toast("正演模拟已生成 Output Data");
 }
+
+function currentModelOptions() {
+  const ds = currentDisplayed();
+  const rp = getEffectiveRadarParams(ds);
+  const numTraces = oddAtLeast(Number($("#model-traces")?.value || ds?.numTraces || 301), 9);
+  const depthSamples = oddAtLeast(Number($("#model-depth-samples")?.value || 241), 9);
+  const depthMaxM = finiteNumber($("#model-depth-max")?.value, manualModelResult?.modelDepthMax || rp.depthMaxM || inferredDepthMax(ds));
+  const distanceStepM = finiteNumber($("#model-dx")?.value, rp.dxM || datasetDxM(ds));
+  const background = {
+    epsr: finiteNumber($("#model-epsr")?.value, model.background.epsr),
+    sigma: finiteNumber($("#model-sigma")?.value, model.background.sigma),
+    mu: finiteNumber($("#model-mu")?.value, model.background.mu)
+  };
+  return { numTraces, depthSamples, depthMaxM, distanceStepM, background };
+}
+
+function oddAtLeast(value, min) {
+  let n = Math.max(min, Math.floor(Number(value) || min));
+  if (n % 2 === 0) n += 1;
+  return n;
+}
+
+function modelSourceHorizons() {
+  if (manualModelResult?.horizons?.length) return manualModelResult.horizons;
+  if (geologyResult?.horizons?.length) return geologyResult.horizons;
+  return [];
+}
+
+function rebuildModel2d() {
+  if (!model2dDirty && model2dResult) return model2dResult;
+  const opts = currentModelOptions();
+  model.background = opts.background;
+  model.layerMaterials = (model.layerMaterials?.length ? model.layerMaterials : DEFAULT_MODEL_MATERIALS).map((m, i) => i === 0 ? { ...m, ...opts.background } : m);
+  model.objects = (model.objects || []).map(normalizeObject);
+  model2dResult = manualHorizonsToModel(modelSourceHorizons(), { ...opts, layerMaterials: model.layerMaterials, objects: model.objects });
+  model2dDirty = false;
+  return model2dResult;
+}
+
+function markModel2dDirty() {
+  model2dDirty = true;
+  model2dResult = null;
+}
+
+function modelPlot(rect) {
+  return { x: 52, y: 18, w: Math.max(20, rect.width - 70), h: Math.max(20, rect.height - 54) };
+}
+
+function modelWorldToCanvas(xM, zM, rect, result = model2dResult || rebuildModel2d()) {
+  const plot = modelPlot(rect), xMax = result.distanceAxisM[result.distanceAxisM.length - 1] || 1, zMax = result.depthAxisM[result.depthAxisM.length - 1] || 1;
+  return { x: plot.x + xM / Math.max(1e-9, xMax) * plot.w, y: plot.y + zM / Math.max(1e-9, zMax) * plot.h };
+}
+
+function modelCanvasToWorld(x, y, rect, result = model2dResult || rebuildModel2d()) {
+  const plot = modelPlot(rect), xMax = result.distanceAxisM[result.distanceAxisM.length - 1] || 1, zMax = result.depthAxisM[result.depthAxisM.length - 1] || 1;
+  return { xM: Math.max(0, Math.min(xMax, (x - plot.x) / plot.w * xMax)), zM: Math.max(0, Math.min(zMax, (y - plot.y) / plot.h * zMax)) };
+}
+
+function renderModel() {
+  const cv = $("#model-canvas");
+  if (!cv) return;
+  const result = rebuildModel2d();
+  const rect = cv.parentElement.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  cv.width = Math.max(1, Math.floor(rect.width * dpr));
+  cv.height = Math.max(1, Math.floor(rect.height * dpr));
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = canvasTheme.bg1;
+  ctx.fillRect(0, 0, rect.width, rect.height);
+  const plot = modelPlot(rect);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
+  const img = ctx.createImageData(Math.max(1, Math.floor(plot.w)), Math.max(1, Math.floor(plot.h)));
+  for (let py = 0; py < img.height; py++) {
+    const iz = Math.min(result.nz - 1, Math.floor(py / Math.max(1, img.height - 1) * result.nz));
+    for (let px = 0; px < img.width; px++) {
+      const ix = Math.min(result.nx - 1, Math.floor(px / Math.max(1, img.width - 1) * result.nx));
+      const epsr = result.epsrField[iz * result.nx + ix], q = Math.max(0, Math.min(1, (epsr - 1) / 30)), i = (py * img.width + px) * 4;
+      img.data[i] = 20 + Math.round(q * 180);
+      img.data[i + 1] = 22 + Math.round(q * 130);
+      img.data[i + 2] = 26 + Math.round((1 - q) * 80);
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, plot.x, plot.y);
+  drawModelHorizons(ctx, rect, result);
+  drawModelObjects(ctx, rect, result);
+  ctx.restore();
+  drawModelAxes(ctx, rect, result);
+  renderModelList();
+  const status = $("#model-status");
+  if (status) status.textContent = `${result.nx} traces x ${result.nz} depth cells · ${result.objects.length} objects · ${result.horizons.length} horizons`;
+};
+
+function drawModelAxes(ctx, rect, result) {
+  const plot = modelPlot(rect);
+  ctx.strokeStyle = canvasTheme.t3; ctx.fillStyle = canvasTheme.t2; ctx.font = "11px Consolas"; ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+  const xMax = result.distanceAxisM[result.distanceAxisM.length - 1] || 0, zMax = result.depthAxisM[result.depthAxisM.length - 1] || 0;
+  for (let i = 0; i <= 4; i++) {
+    const x = plot.x + plot.w * i / 4, z = plot.y + plot.h * i / 4;
+    ctx.beginPath(); ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(plot.x, z); ctx.lineTo(plot.x + plot.w, z); ctx.stroke();
+    ctx.fillText((xMax * i / 4).toFixed(1), x - 8, plot.y + plot.h + 17);
+    ctx.fillText((zMax * i / 4).toFixed(1), 8, z + 4);
+  }
+  ctx.fillText("distance (m)", plot.x + plot.w - 78, rect.height - 8);
+  ctx.save(); ctx.translate(14, plot.y + 70); ctx.rotate(-Math.PI / 2); ctx.fillText("depth (m)", 0, 0); ctx.restore();
+}
+
+function drawModelHorizons(ctx, rect, result) {
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.75)";
+  for (const h of result.horizons || []) {
+    const line = h.line || [];
+    ctx.beginPath();
+    let started = false;
+    for (let ix = 0; ix < result.nx; ix++) {
+      const src = Math.round(ix / Math.max(1, result.nx - 1) * Math.max(0, line.length - 1)), depth = line[src];
+      if (!Number.isFinite(depth)) continue;
+      const p = modelWorldToCanvas(result.distanceAxisM[ix], depth, rect, result);
+      if (!started) { ctx.moveTo(p.x, p.y); started = true; } else ctx.lineTo(p.x, p.y);
+    }
+    if (started) ctx.stroke();
+  }
+}
+
+function drawModelObjects(ctx, rect, result) {
+  for (const object of model.objects || []) {
+    const o = normalizeObject(object), p = modelWorldToCanvas(o.xM, o.zM, rect, result), p2 = modelWorldToCanvas(o.xM + o.widthM / 2, o.zM + o.heightM / 2, rect, result), pxRadius = Math.abs(modelWorldToCanvas(o.xM + o.radiusM, o.zM, rect, result).x - p.x);
+    ctx.fillStyle = o.id === selectedModelObjectId ? "rgba(255,255,255,.22)" : "rgba(201,169,110,.30)";
+    ctx.strokeStyle = o.id === selectedModelObjectId ? "#fff" : canvasTheme.gold || canvasTheme.t0;
+    ctx.lineWidth = o.id === selectedModelObjectId ? 2 : 1.3;
+    if (o.type === "circle" || o.type === "pipe") { ctx.beginPath(); ctx.arc(p.x, p.y, pxRadius, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+    else if (o.type === "polygon" && o.points.length >= 3) {
+      ctx.beginPath(); o.points.forEach((pt, i) => { const pp = modelWorldToCanvas(pt.xM, pt.zM, rect, result); if (i) ctx.lineTo(pp.x, pp.y); else ctx.moveTo(pp.x, pp.y); }); ctx.closePath(); ctx.fill(); ctx.stroke();
+    } else {
+      const w = Math.abs((p2.x - p.x) * 2), h = Math.abs((p2.y - p.y) * 2);
+      ctx.fillRect(p.x - w / 2, p.y - h / 2, w, h); ctx.strokeRect(p.x - w / 2, p.y - h / 2, w, h);
+    }
+  }
+}
+
+function renderModelList() {
+  const list = $("#model-list");
+  if (!list) return;
+  if (!model.objects.length) { list.innerHTML = "No model objects."; return; }
+  list.innerHTML = model.objects.map((o, i) => `<div class="model-object-row${o.id === selectedModelObjectId ? " active" : ""}"><button data-model-select="${escapeHtml(o.id)}">${i + 1}. ${escapeHtml(o.type)} epsr=${axisNumber(o.epsr)}</button><button data-model-delete="${escapeHtml(o.id)}">Del</button></div>`).join("");
+  $$("[data-model-select]").forEach(btn => btn.onclick = () => { selectedModelObjectId = btn.dataset.modelSelect; renderModel(); syncModelObjectForm(); });
+  $$("[data-model-delete]").forEach(btn => btn.onclick = () => { model.objects = model.objects.filter(o => o.id !== btn.dataset.modelDelete); if (selectedModelObjectId === btn.dataset.modelDelete) selectedModelObjectId = ""; markModel2dDirty(); renderModel(); syncModelObjectForm(); });
+}
+
+function syncModelObjectForm() {
+  const object = model.objects.find(o => o.id === selectedModelObjectId) || null;
+  for (const id of ["model-object-type","model-object-x","model-object-z","model-object-width","model-object-height","model-object-radius","model-object-epsr","model-object-sigma","model-object-mu"]) { const el = $(`#${id}`); if (el) el.disabled = !object; }
+  if (!object) return;
+  $("#model-object-type").value = object.type; $("#model-object-x").value = axisNumber(object.xM); $("#model-object-z").value = axisNumber(object.zM); $("#model-object-width").value = axisNumber(object.widthM); $("#model-object-height").value = axisNumber(object.heightM); $("#model-object-radius").value = axisNumber(object.radiusM); $("#model-object-epsr").value = axisNumber(object.epsr); $("#model-object-sigma").value = axisNumber(object.sigma); $("#model-object-mu").value = axisNumber(object.mu);
+}
+
+function updateSelectedModelObject() {
+  const object = model.objects.find(o => o.id === selectedModelObjectId);
+  if (!object) return;
+  Object.assign(object, normalizeObject({ ...object, type: $("#model-object-type")?.value || object.type, xM: Number($("#model-object-x")?.value), zM: Number($("#model-object-z")?.value), widthM: Number($("#model-object-width")?.value), heightM: Number($("#model-object-height")?.value), radiusM: Number($("#model-object-radius")?.value), epsr: Number($("#model-object-epsr")?.value), sigma: Number($("#model-object-sigma")?.value), mu: Number($("#model-object-mu")?.value) }));
+  markModel2dDirty();
+  renderModel();
+}
+
+function addModelObject(type, world) {
+  const preset = type === "pipe" ? MATERIAL_PRESETS.find(m => m.id === "pipe") : MATERIAL_PRESETS.find(m => m.id === "rock");
+  const object = normalizeObject({ id: `O${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`, type, xM: world.xM, zM: world.zM, widthM: type === "rectangle" ? 0.8 : 0.5, heightM: type === "rectangle" ? 0.45 : 0.5, radiusM: type === "pipe" ? 0.18 : 0.25, materialId: preset?.id, ...(preset || {}) });
+  model.objects.push(object); selectedModelObjectId = object.id; markModel2dDirty(); renderModel(); syncModelObjectForm();
+}
+
+function hitModelObject(world) {
+  for (let i = model.objects.length - 1; i >= 0; i--) {
+    const o = normalizeObject(model.objects[i]), dx = Math.abs(world.xM - o.xM), dz = Math.abs(world.zM - o.zM), r = o.type === "circle" || o.type === "pipe" ? o.radiusM : Math.max(o.widthM, o.heightM) / 2;
+    if (dx <= r && dz <= r) return model.objects[i];
+  }
+  return null;
+}
+
+bindModel = function bindModelV2() {
+  const cv = $("#model-canvas");
+  if (!cv) return;
+  let polygon = [];
+  cv.addEventListener("mousedown", e => {
+    const rect = cv.getBoundingClientRect(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect);
+    if (modelTool === "select") {
+      const hit = hitModelObject(world);
+      selectedModelObjectId = hit?.id || ""; syncModelObjectForm(); renderModel();
+      if (hit) modelDrag = { id: hit.id, start: world, ox: hit.xM, oz: hit.zM };
+      return;
+    }
+    if (modelTool === "polygon") {
+      polygon.push(world);
+      if (polygon.length >= 3 && e.detail >= 2) { const object = normalizeObject({ type: "polygon", points: polygon, xM: polygon[0].xM, zM: polygon[0].zM, epsr: 12, sigma: 0.001, mu: 1 }); model.objects.push(object); selectedModelObjectId = object.id; polygon = []; markModel2dDirty(); }
+      renderModel(); return;
+    }
+    addModelObject(modelTool === "circle" ? "circle" : modelTool === "pipe" ? "pipe" : "rectangle", world);
+  });
+  cv.addEventListener("mousemove", e => {
+    if (!modelDrag) return;
+    const rect = cv.getBoundingClientRect(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect), object = model.objects.find(o => o.id === modelDrag.id);
+    if (!object) return;
+    object.xM = Math.max(0, modelDrag.ox + world.xM - modelDrag.start.xM); object.zM = Math.max(0, modelDrag.oz + world.zM - modelDrag.start.zM);
+    markModel2dDirty();
+    renderModel(); syncModelObjectForm();
+  });
+  addEventListener("mouseup", () => { modelDrag = null; });
+};
+
+async function buildModel2dOutput() {
+  const ds = currentDisplayed();
+  if (!ds) return toast("Import data before building a 2-D model.", "warn");
+  const params = { ...currentModelOptions(), horizons: modelSourceHorizons(), layerMaterials: model.layerMaterials, objects: model.objects };
+  const result = await runWorker("model2d-build", ds, params);
+  model2dResult = result.model2d;
+  store.setOutput({ data: result.data, numTraces: result.numTraces, numSamples: result.numSamples, name: "model2d_epsr", meta: result.meta, model2d: result.model2d, depthAxisM: result.depthAxisM, depthStep: result.depthStep }, { name: "Build 2-D Model", op: "model2d-build", params });
+  displaySource = "output"; $("#display-mode").value = "output"; refresh(); renderModel(); toast("2-D electromagnetic model generated.");
+}
+
+forwardModel = async function forwardModelV2(mode = "tm") {
+  const ds = currentDisplayed();
+  if (!ds) return toast("Import data before FDTD forward modeling.", "warn");
+  const modelPayload = rebuildModel2d();
+  const fdtd = {
+    traceCount: Math.max(1, Math.floor(Number($("#fdtd-traces")?.value || Math.min(80, modelPayload.nx)))),
+    samples: Math.max(16, Math.floor(Number($("#fdtd-samples")?.value || 260))),
+    frequencyHz: Math.max(1, Number($("#fdtd-frequency")?.value || 500) * 1e6),
+    receiverOffsetM: finiteNumber($("#fdtd-offset")?.value, 0.317),
+    npml: Math.max(2, Math.floor(Number($("#fdtd-pml")?.value || 8))),
+    outstep: Math.max(1, Math.floor(Number($("#fdtd-outstep")?.value || 1))),
+    airThicknessM: Math.max(0, Number($("#fdtd-air")?.value || 0.6)),
+    antennaZ: finiteNumber($("#fdtd-antenna-z")?.value, -0.3)
+  };
+  $("#footer-status").textContent = `${mode.toUpperCase()} FDTD running...`;
+  try {
+    fdtdForwardResult = await runWorker(mode === "te" ? "fdtd-te2d" : "fdtd-tm2d", ds, { model2d: modelPayload, fdtd });
+    store.setOutput({ ...fdtdForwardResult, name: `${mode}_fdtd_forward` }, { name: `${mode.toUpperCase()} FDTD Forward`, op: `fdtd-${mode}2d`, params: fdtd });
+    displaySource = "output"; $("#display-mode").value = "output"; refresh();
+    $("#footer-status").textContent = `${mode.toUpperCase()} FDTD completed`;
+    toast(`${mode.toUpperCase()} FDTD forward result generated.`);
+  } catch (error) {
+    $("#footer-status").textContent = "FDTD failed";
+    toast(error.message || String(error), "err");
+  }
+};
+
+function exportModelMat() {
+  const result = fdtdForwardResult || store.output;
+  if (!result?.data?.length) return toast("Run FDTD before exporting MAT.", "warn");
+  const mat = writeMatFile(variablesFromForwardResult(result, model2dResult || rebuildModel2d(), currentModelOptions()));
+  download(new Blob([mat], { type: "application/octet-stream" }), "lpr_fdtd_forward.mat");
+}
+
+function exportModelPng() {
+  const cv = $("#model-canvas");
+  if (!cv) return;
+  cv.toBlob(blob => blob && download(blob, "lpr_2d_model.png"));
+}
+
+function manualPeakPickSource(ds = currentDisplayed()) {
+  const aided = manualFeatureResult?.boundaryProbability || manualFeatureResult?.data;
+  if (aided?.length) return { data: aided, invert: false, threshold: 0.08 };
+  return { data: ds?.data, invert: true, threshold: -Infinity };
+}
+
+function manualBrushPeakPickSource(ds = currentDisplayed()) {
+  return { data: ds?.data, invert: true, threshold: -Infinity };
+}
+
+function manualPickRadius() {
+  const value = Number($("#manual-pick-radius")?.value);
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 3;
+}
+
+function upsertManualPointByTrace(layer, point) {
+  const idx = layer.points.findIndex(p => p.traceIndex === point.traceIndex);
+  if (idx >= 0) layer.points[idx] = point;
+  else layer.points.push(point);
+}
+
+function addManualBrushPoints(layer, point) {
+  const ds = currentDisplayed();
+  const st = ensureManualState();
+  if (!ds || !layer || !point) return;
+  if (!st.snapEnabled) {
+    addManualPoint(layer, point, 1);
+    return;
+  }
+  const src = manualBrushPeakPickSource(ds);
+  if (!src.data?.length) {
+    addManualPoint(layer, point, 1);
+    return;
+  }
+  const picks = pickPeaksNearPoint(src.data, ds.numTraces, ds.numSamples, point, {
+    radius: manualPickRadius(),
+    startSample: 1,
+    endSample: manualSampleMax(ds),
+    invert: src.invert
+  }).filter(p => (p.amplitude ?? 0) >= src.threshold);
+  if (!picks.length) return;
+  for (const p of picks) upsertManualPointByTrace(layer, enrichManualPoint({ traceIndex: p.traceIndex, sampleIndex: p.sampleIndex, source: "snapped", snapScore: p.amplitude }, ds));
+  sortLayerPoints(layer);
+}
+
+manualSnapPoint = function manualSnapPointV2(point) {
+  const st = ensureManualState();
+  const ds = currentDisplayed();
+  if (!ds || !st.snapEnabled) return enrichManualPoint(point, ds);
+  const src = manualPeakPickSource(ds);
+  if (!src.data?.length) return enrichManualPoint(point, ds);
+  const snapped = snapPointToPeak(src.data, ds.numTraces, ds.numSamples, point, {
+    startSample: 1,
+    endSample: manualSampleMax(ds),
+    radius: 0,
+    invert: src.invert
+  });
+  if ((snapped.amplitude || snapped.snapScore || 0) < src.threshold) return enrichManualPoint(point, ds);
+  return enrichManualPoint({ traceIndex: snapped.traceIndex, sampleIndex: snapped.sampleIndex, source: "snapped", snapScore: snapped.amplitude }, ds);
+};
+
+manualAutoTraceFromSeed = function manualAutoTraceFromSeedV2(seed) {
+  const ds = currentDisplayed();
+  const prob = manualFeatureResult?.boundaryProbability || manualFeatureResult?.data;
+  if (!ds || !prob?.length) return toast("Compute aids before seed tracing.", "warn");
+  const layer = createManualLayer("snapped");
+  layer.name = `Seed ${layer.name}`;
+  layer.points = traceFromSeed(prob, ds.numTraces, ds.numSamples, seed, {
+    halfWindowSamples: Math.max(8, Math.round(0.5 / manualDepthStep(ds))),
+    startSample: 1,
+    endSample: manualSampleMax(ds),
+    directionPenalty: 0.08
+  }).map(p => enrichManualPoint({ ...p, source: "snapped" }, ds));
+  sortLayerPoints(layer);
+  drawManualWorkbench();
+};
 
 bindUi();
 refresh();

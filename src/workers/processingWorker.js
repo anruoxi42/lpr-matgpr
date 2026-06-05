@@ -1,4 +1,7 @@
 import * as A from "../processing/algorithms.js";
+import { manualHorizonsToModel, prepareFdtdGridFromModel } from "../modeling/model2d.js";
+import { simulateTm2d } from "../modeling/fdtd/tm2d.js";
+import { simulateTe2d } from "../modeling/fdtd/te2d.js";
 
 function axisParams(dataset, params = {}) {
   const meta = dataset.meta || {};
@@ -108,10 +111,48 @@ self.onmessage = ({ data }) => {
     else if (op === "geo-stratigraphy") r = A.geologyEnforceStratigraphy(d, nt, ns, params);
     else if (op === "geo-classify-model") r = A.geologyClassifyModel(d, nt, ns, params);
     else if (op === "geology-model") r = A.geologicModel(d, nt, ns, params);
+    else if (op === "model2d-build") {
+      const model = manualHorizonsToModel(params.horizons || [], {
+        numTraces: params.numTraces || nt,
+        depthSamples: params.depthSamples || params.modelSamples || 240,
+        distanceStepM: params.distanceStepM || axes.dxM,
+        depthMaxM: params.depthMaxM || params.modelDepthMax,
+        layerMaterials: params.layerMaterials,
+        objects: params.objects
+      });
+      r = {
+        data: model.epsrField,
+        numTraces: model.nx,
+        numSamples: model.nz,
+        verticalAxisKind: "depth",
+        depthAxisM: model.depthAxisM,
+        depthStep: model.depthStepM,
+        dxM: model.distanceStepM,
+        model2d: model,
+        name: "model2d_epsr"
+      };
+    }
+    else if (op === "fdtd-tm2d" || op === "fdtd-te2d") {
+      const model = params.model2d || params.model;
+      if (!model) throw new Error("FDTD requires a model2d payload.");
+      const fdtdParams = params.fdtd || params;
+      const grid = prepareFdtdGridFromModel(model, fdtdParams);
+      const progress = detail => self.postMessage({ id, progress: true, detail });
+      r = op === "fdtd-te2d"
+        ? simulateTe2d(grid, { ...fdtdParams, onProgress: progress })
+        : simulateTm2d(grid, { ...fdtdParams, onProgress: progress });
+      r.model2d = model;
+      r.fdtdGrid = { nx: grid.nx, nz: grid.nz, x: grid.x, z: grid.z, npml: grid.npml, airThicknessM: grid.airThicknessM, defaultAntennaZ: grid.defaultAntennaZ };
+      r.name = op === "fdtd-te2d" ? "fdtd_te2d_forward" : "fdtd_tm2d_forward";
+    }
     else throw new Error("Unknown op: " + op);
     r = withUpdatedMeta(r, dataset, params);
     const transfers = r.data?.buffer ? [r.data.buffer] : [];
     if (r.modelData?.buffer) transfers.push(r.modelData.buffer);
+    if (r.model2d?.epsrField?.buffer && !transfers.includes(r.model2d.epsrField.buffer)) transfers.push(r.model2d.epsrField.buffer);
+    if (r.model2d?.sigmaField?.buffer && !transfers.includes(r.model2d.sigmaField.buffer)) transfers.push(r.model2d.sigmaField.buffer);
+    if (r.model2d?.muField?.buffer && !transfers.includes(r.model2d.muField.buffer)) transfers.push(r.model2d.muField.buffer);
+    if (r.gather?.buffer && !transfers.includes(r.gather.buffer)) transfers.push(r.gather.buffer);
     self.postMessage({ id, ok: true, result: r }, transfers);
   } catch (error) {
     self.postMessage({ id, ok: false, error: error.message || String(error) });

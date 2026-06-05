@@ -14,7 +14,13 @@
         <div class="sub">CE-3 .2B + HCD/HAD · Current/Input/Output 数据流</div>
       </div>
       <div id="dataset-title" class="dataset-title">未加载数据</div>
-      <div class="status-dot"><span></span> 本地服务</div>
+        <div class="topbar-right">
+          <div class="theme-toggle" id="theme-toggle">
+            <button data-theme="dark" class="active" title="暗色模式">◉</button>
+            <button data-theme="light" title="亮色模式">◎</button>
+          </div>
+          <div class="status-dot"><span></span> 本地服务</div>
+        </div>
     </header>
 
     <nav id="nav" class="nav">
@@ -28,6 +34,7 @@
           <button data-action="open-undo">Undo / Restore 撤销/恢复</button>
           <button data-action="save-mgp">Save to MGP/MAT 保存 MGP/MAT</button>
           <button data-action="save-depth">Save Depth Migrated Data 保存深度偏移数据</button>
+          <button data-action="convert-mat">Convert to MAT 转换为MAT</button>
           <button data-page="export">Export 导出</button>
         </div>
       </div>
@@ -124,7 +131,7 @@
     <main class="workspace">
       <section id="page-radar" class="page active">
         <div class="toolbar">
-          <input id="file-input" type="file" accept=".2b,.2B,.hcd,.HCD,.had,.HAD" multiple hidden>
+          <input id="file-input" type="file" accept=".2b,.2B,.hcd,.HCD,.had,.HAD,.mat,.MAT" multiple hidden>
           <button data-action="zoom-in" title="放大">Zoom + 放大</button>
           <button data-action="zoom-out" title="缩小">Zoom - 缩小</button>
           <button data-action="zoom-fit" title="全图">Fit 全图</button>
@@ -167,8 +174,8 @@
           <label>Max <input id="amp-max" type="number" value="10" step="0.5"></label>
         </div>
         <div id="drop-zone" class="drop-zone">
-          <strong>拖拽 .2B 或 .hcd/.had 文件到此处，或点击“导入数据”</strong>
-          <span>支持 CE-3 .2B；HCD 按 MATLAB P1_read.m 方式导入，请同时选择同名 .hcd 与 .had</span>
+          <strong>拖拽 .2B、.hcd/.had 或 .mat 文件到此处，或点击”导入数据”</strong>
+          <span>支持 CE-3 .2B；HCD 按 MATLAB P1_read.m 方式导入；MAT 支持 v5 格式数值矩阵</span>
         </div>
         <div id="radar-wrap" class="radar-wrap">
           <canvas id="radar-canvas"></canvas>
@@ -312,12 +319,44 @@
           <div class="button-row">
             <button data-model-tool="select">选择</button>
             <button data-model-tool="circle">圆形</button>
+            <button data-model-tool="rectangle">矩形</button>
+            <button data-model-tool="pipe">管道</button>
             <button data-model-tool="polygon">多边形</button>
           </div>
+          <label>模型道数<input id="model-traces" type="number" value="301" min="9" step="2"></label>
+          <label>深度网格<input id="model-depth-samples" type="number" value="241" min="9" step="2"></label>
+          <label>深度上限 m<input id="model-depth-max" type="number" value="6" step="0.1"></label>
+          <label>dx m<input id="model-dx" type="number" value="0.05" step="0.01"></label>
+          <div class="button-row">
+            <button id="model-build">生成电磁模型</button>
+            <button id="model-fdtd-tm" class="primary">TM 正演</button>
+            <button id="model-fdtd-te">TE 正演</button>
+          </div>
+          <label>FDTD 道数<input id="fdtd-traces" type="number" value="80" min="1" step="5"></label>
+          <label>FDTD 样点<input id="fdtd-samples" type="number" value="260" min="16" step="20"></label>
+          <label>主频 MHz<input id="fdtd-frequency" type="number" value="500" min="1" step="10"></label>
+          <label>收发距 m<input id="fdtd-offset" type="number" value="0.317" step="0.001"></label>
+          <label>PML 网格<input id="fdtd-pml" type="number" value="8" min="2" step="1"></label>
+          <label>输出步长<input id="fdtd-outstep" type="number" value="1" min="1" step="1"></label>
+          <label>空气层 m<input id="fdtd-air" type="number" value="0.6" min="0" step="0.02"></label>
+          <label>天线 Z m<input id="fdtd-antenna-z" type="number" value="-0.3" step="0.01"></label>
+          <h3>Object Properties</h3>
+          <label>类型<select id="model-object-type" disabled><option value="circle">circle</option><option value="rectangle">rectangle</option><option value="pipe">pipe</option><option value="polygon">polygon</option><option value="ellipse">ellipse</option></select></label>
+          <label>X m<input id="model-object-x" type="number" step="0.01" disabled></label>
+          <label>Z m<input id="model-object-z" type="number" step="0.01" disabled></label>
+          <label>宽 m<input id="model-object-width" type="number" step="0.01" disabled></label>
+          <label>高 m<input id="model-object-height" type="number" step="0.01" disabled></label>
+          <label>半径 m<input id="model-object-radius" type="number" step="0.01" disabled></label>
+          <label>物体 εr<input id="model-object-epsr" type="number" step="0.1" disabled></label>
+          <label>物体 σ<input id="model-object-sigma" type="number" step="0.001" disabled></label>
+          <label>物体 μ<input id="model-object-mu" type="number" step="0.1" disabled></label>
           <div class="button-row">
             <button id="model-export">保存 JSON</button>
+            <button id="model-export-mat">导出 MAT</button>
+            <button id="model-export-png">导出 PNG</button>
             <button id="model-velocity">生成 2-D 速度场</button>
           </div>
+          <div id="model-status" class="muted">尚未生成二维电磁模型。</div>
           <div id="model-list" class="list muted">暂无物体</div>
         </aside>
       </section>
@@ -468,6 +507,7 @@
             <button data-manual-tool="erase">Erase 橡皮</button>
             <button data-manual-tool="seed">Seed trace 种子追踪</button>
             <label class="toggle-label"><input type="checkbox" id="manual-snap" checked> Snap 吸附</label>
+            <label>pick_radius <input id="manual-pick-radius" type="number" value="3" min="0" max="30" step="1"></label>
           </div>
           <div class="manual-geo-actions">
             <button data-page="geo-modeling">Auto Geologic Modeling 自动建模</button>
@@ -588,5 +628,41 @@
 
   <div id="toast"></div>
   <script type="module" src="./src/main.js"></script>
+  <script>
+    /* SpotLight cursor — updates CSS vars for the global radial gradient */
+    const app = document.getElementById('app');
+    if (app && window.matchMedia('(hover: hover)').matches) {
+      document.addEventListener('mousemove', e => {
+        app.style.setProperty('--mx', e.clientX + 'px');
+        app.style.setProperty('--my', e.clientY + 'px');
+      }, { passive: true });
+    }
+
+    /* Theme toggle — data-theme on <html>, persisted to localStorage */
+    (function() {
+      const html = document.documentElement;
+      const toggle = document.getElementById('theme-toggle');
+      if (!toggle) return;
+
+      const saved = localStorage.getItem('lpr-theme') || 'dark';
+      html.setAttribute('data-theme', saved);
+      updateButtons(saved);
+
+      toggle.addEventListener('click', e => {
+        const btn = e.target.closest('button[data-theme]');
+        if (!btn) return;
+        const theme = btn.dataset.theme;
+        html.setAttribute('data-theme', theme);
+        localStorage.setItem('lpr-theme', theme);
+        updateButtons(theme);
+      });
+
+      function updateButtons(active) {
+        toggle.querySelectorAll('button').forEach(b => {
+          b.classList.toggle('active', b.dataset.theme === active);
+        });
+      }
+    })();
+  </script>
 </body>
 </html>

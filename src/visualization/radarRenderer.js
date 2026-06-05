@@ -12,6 +12,24 @@ const maps = {
   seismic(t) { t = Math.max(0, Math.min(1, t)); return t < .5 ? [0, 0, t * 2 * 255] : [(t - .5) * 2 * 255, 0, (1 - (t - .5) * 2) * 255]; }
 };
 
+/* default fallback (dark); setTheme() replaces at runtime */
+function defaultTheme() {
+  return {
+    bg0:   "#000000",
+    bg1:   "#080808",
+    t0:    "#E8E5DF",
+    t1:    "rgba(232,229,223,0.73)",
+    t2:    "rgba(232,229,223,0.42)",
+    t3:    "rgba(232,229,223,0.22)",
+    gold:  "#C9A96E",
+    goldBg:"rgba(201,169,110,0.08)",
+    ok:    "#5B9A6B",
+    er:    "#C25450",
+    wn:    "#C9A96E",
+    bg0Opaque: "#000000",  /* used for solid overlays like measure labels */
+  };
+}
+
 export class RadarRenderer {
   constructor(canvas, wrap, onCursor, callbacks = {}) {
     this.canvas = canvas;
@@ -19,6 +37,7 @@ export class RadarRenderer {
     this.ctx = canvas.getContext("2d");
     this.onCursor = onCursor;
     this.callbacks = callbacks;
+    this.theme = defaultTheme();
     this.ampMin = -10;
     this.ampMax = 10;
     this.cmap = "jet";
@@ -39,6 +58,7 @@ export class RadarRenderer {
     this.bind();
     this.resize();
   }
+  setTheme(t) { this.theme = t; this.render(); }
   setDataset(ds) {
     this.dataset = ds;
     this.view = ds ? { t0: 0, t1: ds.numTraces - 1, s0: 0, s1: ds.numSamples - 1 } : null;
@@ -218,11 +238,11 @@ export class RadarRenderer {
     if (this.view.s1 > ns - 1) { this.view.s1 = ns - 1; this.view.s0 = Math.max(0, this.view.s1 - h); }
   }
   render() {
-    const ctx = this.ctx;
-    ctx.fillStyle = "#080c14";
+    const ctx = this.ctx, T = this.theme;
+    ctx.fillStyle = T.bg0;
     ctx.fillRect(0, 0, this.w || 1, this.h || 1);
     if (!this.dataset || !this.view) {
-      ctx.fillStyle = "#7890aa"; ctx.textAlign = "center"; ctx.font = "14px Segoe UI";
+      ctx.fillStyle = T.t2; ctx.textAlign = "center"; ctx.font = "14px Segoe UI";
       ctx.fillText("请先导入数据", (this.w || 1) / 2, (this.h || 1) / 2);
       return;
     }
@@ -255,12 +275,12 @@ export class RadarRenderer {
     this.ctx.drawImage(off, p.x, p.y, p.w, p.h);
   }
   drawAxes(p) {
-    const ctx = this.ctx;
+    const ctx = this.ctx, T = this.theme;
     ctx.save();
-    ctx.strokeStyle = "rgba(236,248,255,.82)";
+    ctx.strokeStyle = T.t1;  /* axis border */
     ctx.strokeRect(p.x, p.y, p.w, p.h);
-    ctx.fillStyle = "#f8fcff";
-    ctx.shadowColor = "rgba(0,0,0,.95)";
+    ctx.fillStyle = T.t0;    /* axis labels */
+    ctx.shadowColor = T.bg0Opaque;
     ctx.shadowBlur = 5;
     ctx.font = "11px Consolas";
     ctx.textAlign = "center";
@@ -282,21 +302,22 @@ export class RadarRenderer {
     if (!this.markerLine || !this.dataset) return;
     const x = p.x + (this.currentTrace - this.view.t0) / (this.view.t1 - this.view.t0) * p.w;
     if (x < p.x || x > p.x + p.w) return;
-    this.ctx.strokeStyle = "rgba(255,255,255,.85)";
+    this.ctx.strokeStyle = this.theme.t0;
     this.ctx.setLineDash([5, 4]);
     this.ctx.beginPath(); this.ctx.moveTo(x, p.y); this.ctx.lineTo(x, p.y + p.h); this.ctx.stroke();
     this.ctx.setLineDash([]);
   }
   drawSelections(p) {
     if (!this.dataset || !this.view) return;
+    const T = this.theme, goldStrong = "rgba(201,169,110,0.18)", goldDim = "rgba(201,169,110,0.08)";
     const draw = (sel, strong = false) => {
       const x1 = p.x + (sel.startT - this.view.t0) / (this.view.t1 - this.view.t0) * p.w;
       const x2 = p.x + (sel.endT - this.view.t0) / (this.view.t1 - this.view.t0) * p.w;
       const x = Math.max(p.x, Math.min(x1, x2));
       const w = Math.min(p.x + p.w, Math.max(x1, x2)) - x;
       if (w <= 0) return;
-      this.ctx.fillStyle = strong ? "rgba(77,139,255,.20)" : "rgba(77,139,255,.10)";
-      this.ctx.strokeStyle = strong ? "#4d8bff" : "rgba(77,139,255,.62)";
+      this.ctx.fillStyle = strong ? goldStrong : goldDim;
+      this.ctx.strokeStyle = strong ? T.gold : "rgba(201,169,110,0.55)";
       this.ctx.lineWidth = strong ? 1.6 : 1;
       this.ctx.setLineDash(strong ? [] : [4, 3]);
       this.ctx.fillRect(x, p.y, w, p.h);
@@ -308,13 +329,14 @@ export class RadarRenderer {
   }
   drawMeasure(p) {
     if (!this.measurePoints.length || !this.view) return;
+    const T = this.theme;
     const xy = pt => ({
       x: p.x + (pt.t - this.view.t0) / (this.view.t1 - this.view.t0) * p.w,
       y: p.y + (pt.s - this.view.s0) / (this.view.s1 - this.view.s0) * p.h
     });
     const pts = this.measurePoints.map(xy);
-    this.ctx.fillStyle = "#ffb020";
-    this.ctx.strokeStyle = "#ffb020";
+    this.ctx.fillStyle = T.wn;
+    this.ctx.strokeStyle = T.wn;
     this.ctx.lineWidth = 1.8;
     for (const q of pts) { this.ctx.beginPath(); this.ctx.arc(q.x, q.y, 4, 0, Math.PI * 2); this.ctx.fill(); }
     if (pts.length === 2) {
@@ -323,9 +345,9 @@ export class RadarRenderer {
       this.ctx.setLineDash([]);
       const a = this.measurePoints[0], b = this.measurePoints[1], label = `dT ${Math.abs(b.t - a.t)} / dS ${Math.abs(b.s - a.s)}`;
       const lx = (pts[0].x + pts[1].x) / 2, ly = (pts[0].y + pts[1].y) / 2;
-      this.ctx.fillStyle = "rgba(8,12,20,.86)";
+      this.ctx.fillStyle = T.bg0Opaque;
       this.ctx.fillRect(lx - 54, ly - 22, 108, 18);
-      this.ctx.fillStyle = "#ffb020";
+      this.ctx.fillStyle = T.wn;
       this.ctx.font = "10px Consolas";
       this.ctx.textAlign = "center";
       this.ctx.fillText(label, lx, ly - 9);
@@ -333,6 +355,7 @@ export class RadarRenderer {
   }
   drawAnnotations(p) {
     if (!this.view) return;
+    const T = this.theme;
     const xy = (t, s) => ({
       x: p.x + (t - this.view.t0) / (this.view.t1 - this.view.t0) * p.w,
       y: p.y + (s - this.view.s0) / (this.view.s1 - this.view.s0) * p.h
@@ -341,14 +364,14 @@ export class RadarRenderer {
       this.ctx.globalAlpha = ghost ? .75 : 1;
       if (a.type === "point") {
         const q = xy(a.t, a.s);
-        this.ctx.fillStyle = "#f53f3f"; this.ctx.beginPath(); this.ctx.arc(q.x, q.y, 4, 0, Math.PI * 2); this.ctx.fill();
-        this.ctx.fillStyle = "#fff"; this.ctx.font = "10px Segoe UI"; this.ctx.textAlign = "left"; this.ctx.fillText(a.label || "P", q.x + 7, q.y + 3);
+        this.ctx.fillStyle = T.er; this.ctx.beginPath(); this.ctx.arc(q.x, q.y, 4, 0, Math.PI * 2); this.ctx.fill();
+        this.ctx.fillStyle = T.t0; this.ctx.font = "10px Segoe UI"; this.ctx.textAlign = "left"; this.ctx.fillText(a.label || "P", q.x + 7, q.y + 3);
       } else if (a.type === "line") {
         const a0 = xy(a.t1, a.s1), a1 = xy(a.t2, a.s2);
-        this.ctx.strokeStyle = "#00b42a"; this.ctx.lineWidth = 1.8; this.ctx.beginPath(); this.ctx.moveTo(a0.x, a0.y); this.ctx.lineTo(a1.x, a1.y); this.ctx.stroke();
+        this.ctx.strokeStyle = T.ok; this.ctx.lineWidth = 1.8; this.ctx.beginPath(); this.ctx.moveTo(a0.x, a0.y); this.ctx.lineTo(a1.x, a1.y); this.ctx.stroke();
       } else if (a.type === "rect") {
         const a0 = xy(a.t1, a.s1), a1 = xy(a.t2, a.s2);
-        this.ctx.strokeStyle = "#ff7d00"; this.ctx.lineWidth = 1.4; this.ctx.setLineDash([5, 3]);
+        this.ctx.strokeStyle = T.wn; this.ctx.lineWidth = 1.4; this.ctx.setLineDash([5, 3]);
         this.ctx.strokeRect(Math.min(a0.x, a1.x), Math.min(a0.y, a1.y), Math.abs(a1.x - a0.x), Math.abs(a1.y - a0.y));
         this.ctx.setLineDash([]);
       }
@@ -358,36 +381,37 @@ export class RadarRenderer {
     if (this.pendingAnnotation) drawAnn({ type: "point", t: this.pendingAnnotation.t, s: this.pendingAnnotation.s, label: "1" }, true);
   }
   drawColorbar(p) {
-    const ctx = this.ctx, fn = maps[this.cmap] || maps.jet, x = p.x + p.w + 8, y = p.y + p.h * .2, h = p.h * .6;
+    const ctx = this.ctx, T = this.theme, fn = maps[this.cmap] || maps.jet, x = p.x + p.w + 8, y = p.y + p.h * .2, h = p.h * .6;
     for (let i = 0; i < h; i++) {
       const [r, g, b] = fn(1 - i / h);
       ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fillRect(x, y + i, 12, 1);
     }
-    ctx.strokeStyle = "rgba(236,248,255,.82)"; ctx.strokeRect(x, y, 12, h);
-    ctx.fillStyle = "#f8fcff"; ctx.shadowColor = "rgba(0,0,0,.95)"; ctx.shadowBlur = 4; ctx.font = "9px Consolas"; ctx.textAlign = "left";
+    ctx.strokeStyle = T.t1; ctx.strokeRect(x, y, 12, h);
+    ctx.fillStyle = T.t0; ctx.shadowColor = T.bg0Opaque; ctx.shadowBlur = 4; ctx.font = "9px Consolas"; ctx.textAlign = "left";
     ctx.fillText(this.ampMax.toFixed(1), x + 16, y + 8);
     ctx.fillText(this.ampMin.toFixed(1), x + 16, y + h);
   }
 }
 
-export function drawLine(canvas, values, opts = {}) {
+export function drawLine(canvas, values, opts = {}, theme) {
+  const T = theme || defaultTheme();
   const rect = canvas.getBoundingClientRect(), dpr = devicePixelRatio || 1;
   canvas.width = Math.max(1, rect.width * dpr); canvas.height = Math.max(1, rect.height * dpr);
   const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const w = rect.width, h = rect.height, m = { l: 48, r: 14, t: 22, b: 28 };
-  ctx.fillStyle = "#080c14"; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = T.bg0; ctx.fillRect(0, 0, w, h);
   if (!values?.length) return;
   let min = Math.min(...values), max = Math.max(...values); if (min === max) { min--; max++; }
-  ctx.strokeStyle = "#26364a"; ctx.lineWidth = .5;
+  ctx.strokeStyle = T.t3; ctx.lineWidth = .5;
   for (let i = 0; i <= 5; i++) { const y = m.t + i / 5 * (h - m.t - m.b); ctx.beginPath(); ctx.moveTo(m.l, y); ctx.lineTo(w - m.r, y); ctx.stroke(); }
-  ctx.strokeStyle = opts.color || "#4d8bff"; ctx.lineWidth = 1.4; ctx.beginPath();
+  ctx.strokeStyle = opts.color || T.gold; ctx.lineWidth = 1.4; ctx.beginPath();
   for (let i = 0; i < values.length; i++) {
     const x = m.l + i / Math.max(1, values.length - 1) * (w - m.l - m.r);
     const y = m.t + (1 - (values[i] - min) / (max - min)) * (h - m.t - m.b);
     i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   }
   ctx.stroke();
-  ctx.fillStyle = "#7890aa"; ctx.font = "10px Consolas"; ctx.textAlign = "right";
+  ctx.fillStyle = T.t2; ctx.font = "10px Consolas"; ctx.textAlign = "right";
   ctx.fillText(max.toExponential(2), m.l - 6, m.t + 8);
   ctx.fillText(min.toExponential(2), m.l - 6, h - m.b);
   if (opts.title) { ctx.textAlign = "left"; ctx.fillText(opts.title, m.l, 14); }

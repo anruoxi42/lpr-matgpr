@@ -22,9 +22,20 @@ import {
   timeDepth
 } from "../src/processing/algorithms.js";
 import { HCD_DEFAULT_DT_NS, parseHadText, parseHcdFile } from "../src/io/hcd.js";
+import { localMaxima, pickPeaksNearPoint, traceFromSeed } from "../src/processing/peakTracking.js";
+import { generateLayeredDielectric, manualHorizonsToModel, modelToFdtdGrid, prepareFdtdGridFromModel } from "../src/modeling/model2d.js";
+import { calConductivity, calDensity, calLossTangent } from "../src/modeling/materials.js";
+import { estimateGridSpacing, gridInterp, padGrid } from "../src/modeling/fdtd/grid.js";
+import { simulateTm2d } from "../src/modeling/fdtd/tm2d.js";
+import { simulateTe2d } from "../src/modeling/fdtd/te2d.js";
+import { variablesFromForwardResult, writeMatFile } from "../src/io/mat.js";
+import { parseMatFileAsync } from "../src/io/mat-reader.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const softwareRoot = dirname(root);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -214,11 +225,93 @@ for (let i = 1; i < geo.horizons.length; i++) {
   }
 }
 
+const peakTrace = Float32Array.from([0, 1, 0, 0.2, 2, 1, 0, 3, 0]);
+assert(JSON.stringify(localMaxima(peakTrace)) === JSON.stringify([1, 4, 7]), "local maxima detection failed");
+const peakData = new Float32Array(5 * 16);
+for (let t = 0; t < 5; t++) {
+  peakData[t * 16 + 5 + (t > 2 ? 1 : 0)] = 1 + t;
+  peakData[t * 16 + 10] = 0.5;
+}
+const picked = pickPeaksNearPoint(peakData, 5, 16, { traceIndex: 2, sampleIndex: 5 }, { radius: 1 });
+assert(picked.length === 3 && picked.some(p => p.traceIndex === 2 && p.sampleIndex === 5), "peak picking near point failed");
+const troughData = Float32Array.from([0, -2, 0, 0, -0.5, 0]);
+const troughPicked = pickPeaksNearPoint(troughData, 1, 6, { traceIndex: 0, sampleIndex: 1 }, { radius: 0, invert: true });
+assert(troughPicked.length === 1 && troughPicked[0].sampleIndex === 1, "inverted trough picking should match MATLAB -radar_data behavior");
+const seeded = traceFromSeed(peakData, 5, 16, { traceIndex: 2, sampleIndex: 5 }, { halfWindowSamples: 3 });
+assert(seeded.length === 5 && seeded[0].traceIndex === 0 && seeded.at(-1).traceIndex === 4, "seed trace tracking failed");
+
+const density = calDensity(9);
+const lt = calLossTangent(density);
+const cd = calConductivity(9, lt);
+assert(Number.isFinite(density) && Number.isFinite(lt) && cd > 0, "material conversion failed");
+
+const h1 = { name: "H1", line: Float32Array.from({ length: 20 }, (_, i) => 1 + 0.1 * Math.sin(i / 3)) };
+const h2 = { name: "H2", line: Float32Array.from({ length: 20 }, (_, i) => 2 + 0.1 * Math.cos(i / 4)) };
+const model2d = manualHorizonsToModel([h1, h2], {
+  numTraces: 20,
+  depthSamples: 30,
+  depthMaxM: 3,
+  distanceStepM: 0.05,
+  objects: [{ type: "circle", xM: 0.5, zM: 1.5, radiusM: 0.15, epsr: 20, sigma: 0.01, mu: 1 }]
+});
+finite(model2d.epsrField, "model2d epsr");
+finite(model2d.sigmaField, "model2d sigma");
+assert(model2d.epsrField.length === 20 * 30 && Math.max(...model2d.epsrField) >= 20, "manual horizons to model failed");
+
+const layered = generateLayeredDielectric({ size: 48, seed: 7, randomRocks: true });
+assert(layered.ep.length === 48 * 48 && layered.boundaries.length === 4, "layered dielectric generation failed");
+
+const interp = gridInterp(Float32Array.from([1, 2, 3, 4]), [0, 1], [0, 1], [0, 0.5, 1], [0, 0.5, 1], "linear");
+assert(interp.length === 9 && Math.abs(interp[4] - 2.5) < 1e-6, "grid interpolation failed");
+const padded = padGrid(Float32Array.from([1, 2, 3, 4]), [0, 1], [0, 1], 1);
+assert(padded.data.length === 16 && padded.x.length === 4 && padded.z.length === 4, "padgrid failed");
+const gridEstimate = estimateGridSpacing(9, 1, Float32Array.from([0, 1, 0, -1, 0]), Float64Array.from([0, 1e-10, 2e-10, 3e-10, 4e-10]), 0.02);
+assert(gridEstimate.dx > 0 && gridEstimate.fmax > 0, "finddx port failed");
+
+const fdtdModel = manualHorizonsToModel([h1], { numTraces: 18, depthSamples: 18, depthMaxM: 1.8, distanceStepM: 0.05 });
+let evenGridRejected = false;
+try {
+  simulateTm2d(modelToFdtdGrid(fdtdModel), { traceCount: 3, samples: 24, frequencyHz: 300e6, npml: 3, receiverOffsetM: 0.05 });
+} catch (error) {
+  evenGridRejected = /odd property-grid/.test(error.message);
+}
+assert(evenGridRejected, "TM FDTD should reject even property-grid dimensions");
+const fdtdGrid = prepareFdtdGridFromModel(fdtdModel, { npml: 3, receiverOffsetM: 0.05, airThicknessM: 0.2, antennaZ: -0.1 });
+const tm = simulateTm2d(fdtdGrid, { traceCount: 3, samples: 24, frequencyHz: 300e6, npml: 3, receiverOffsetM: 0.05 });
+const te = simulateTe2d(fdtdGrid, { traceCount: 3, samples: 20, frequencyHz: 300e6, npml: 3, receiverOffsetM: 0.05 });
+finite(tm.data, "TM FDTD");
+finite(te.data, "TE FDTD");
+assert(tm.numTraces === 3 && tm.numSamples === 24 && te.numTraces === 3, "FDTD dimensions failed");
+assert(rms(tm.data) > 0 && rms(te.data) > 0, "FDTD output is empty");
+
+const mat = writeMatFile(variablesFromForwardResult(tm, fdtdModel, { test: true }));
+assert(mat.byteLength > 256, "MAT export is too small");
+
+const matlabModelPath = join(softwareRoot, "二维建模正演", "Data", "p5_2_Model.mat");
+if (existsSync(matlabModelPath)) {
+  const vars = await parseMatFileAsync(arrayBufferFromNodeBuffer(readFileSync(matlabModelPath)));
+  assert(vars.ep?.rows === 1000 && vars.ep?.cols === 1000 && vars.cd?.rows === 1000 && vars.mu?.rows === 1000, "compressed MATLAB v5 model fixture was not parsed");
+}
+const trackingMatPath = join(softwareRoot, "自动峰值检测和追踪", "data_correct.mat");
+if (existsSync(trackingMatPath)) {
+  const vars = await parseMatFileAsync(arrayBufferFromNodeBuffer(readFileSync(trackingMatPath)));
+  assert(Object.keys(vars).length > 0, "compressed peak-tracking MAT fixture was not parsed");
+}
+const hdf5PulsePath = join(softwareRoot, "二维建模正演", "Data", "P2_pulse_new.mat");
+if (existsSync(hdf5PulsePath)) {
+  let hdf5Rejected = false;
+  try {
+    await parseMatFileAsync(arrayBufferFromNodeBuffer(readFileSync(hdf5PulsePath)));
+  } catch (error) {
+    hdf5Rejected = /MATLAB 7\.3\/HDF5/.test(error.message);
+  }
+  assert(hdf5Rejected, "MATLAB 7.3/HDF5 pulse fixture should fail with an explicit message");
+}
+
 function arrayBufferFromNodeBuffer(buffer) {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
-const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const chDir = join(root, "..", "ch");
 if (existsSync(chDir)) {
   const hadFiles = readdirSync(chDir).filter(name => name.toLowerCase().endsWith(".had")).sort();
