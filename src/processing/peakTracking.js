@@ -62,6 +62,8 @@ export function traceFromSeed(data, numTraces, numSamples, seed, options = {}) {
   const directionPenalty = Number(options.directionPenalty ?? 0.08);
   const startSample = Math.max(0, Math.round(Number(options.startSample ?? 0)));
   const endSample = Math.min(numSamples - 1, Math.round(Number(options.endSample ?? numSamples - 1)));
+  const invert = !!options.invert;
+  const valueAt = (t, s) => invert ? -data[t * numSamples + s] : data[t * numSamples + s];
   const points = [];
   for (const dir of [-1, 1]) {
     let sample = Math.max(startSample, Math.min(endSample, Math.round(seed.sampleIndex)));
@@ -71,14 +73,14 @@ export function traceFromSeed(data, numTraces, numSamples, seed, options = {}) {
       const lo = Math.max(startSample, sample - halfWindow);
       const hi = Math.min(endSample, sample + halfWindow);
       for (let s = lo; s <= hi; s++) {
-        const v = data[t * numSamples + s] - Math.abs(s - sample) / halfWindow * directionPenalty;
+        const v = valueAt(t, s) - Math.abs(s - sample) / halfWindow * directionPenalty;
         if (v > best) {
           best = v;
           bestS = s;
         }
       }
       sample = bestS;
-      part.push({ traceIndex: t, sampleIndex: bestS, amplitude: data[t * numSamples + bestS], snapScore: best });
+      part.push({ traceIndex: t, sampleIndex: bestS, amplitude: valueAt(t, bestS), snapScore: best });
     }
     if (dir < 0) points.push(...part.reverse());
     else points.push(...part.slice(1));

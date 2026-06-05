@@ -2,6 +2,7 @@ export const RECORD_SIZE = 8307;
 export const SAMPLES_PER_TRACE = 2048;
 export const DEFAULT_DT_NS = 0.625;
 export const DEFAULT_DX_M = 0.05;
+const MAX_REASONABLE_TRACE_SPACING_M = 100;
 
 function buildAxis(count, step, offset = 0) {
   const axis = new Float32Array(count);
@@ -22,8 +23,9 @@ function deriveDistanceAxis(meta, numTraces) {
     const dy = meta.posY[i] - meta.posY[i - 1];
     const dz = meta.posZ[i] - meta.posZ[i - 1];
     const dist = Math.hypot(dx, dy, dz);
-    axis[i] = axis[i - 1] + (Number.isFinite(dist) && dist > 0 ? dist : DEFAULT_DX_M);
-    if (Number.isFinite(dist) && dist > 0) steps.push(dist);
+    const valid = Number.isFinite(dist) && dist > 0 && dist <= MAX_REASONABLE_TRACE_SPACING_M;
+    axis[i] = axis[i - 1] + (valid ? dist : DEFAULT_DX_M);
+    if (valid) steps.push(dist);
   }
   return { axis, dxM: median(steps) || DEFAULT_DX_M };
 }

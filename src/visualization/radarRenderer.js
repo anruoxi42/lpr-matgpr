@@ -30,6 +30,11 @@ function defaultTheme() {
   };
 }
 
+function scaleValue(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0.2, Math.min(1, n)) : 1;
+}
+
 export class RadarRenderer {
   constructor(canvas, wrap, onCursor, callbacks = {}) {
     this.canvas = canvas;
@@ -49,6 +54,7 @@ export class RadarRenderer {
     this.mode = "pan";
     this.verticalAxisMode = "sample";
     this.depthAxis = null;
+    this.displayScale = { x: 1, y: 1 };
     this.selections = [];
     this.annotations = [];
     this.measurePoints = [];
@@ -61,7 +67,8 @@ export class RadarRenderer {
   setTheme(t) { this.theme = t; this.render(); }
   setDataset(ds) {
     this.dataset = ds;
-    this.view = ds ? { t0: 0, t1: ds.numTraces - 1, s0: 0, s1: ds.numSamples - 1 } : null;
+    this.view = ds ? this.defaultView(ds) : null;
+    this.displayScale = { x: 1, y: 1 };
     this.currentTrace = 0;
     this.liveSelection = null;
     this.render();
@@ -73,6 +80,10 @@ export class RadarRenderer {
   }
   setAmp(min, max) { this.ampMin = min; this.ampMax = max; this.render(); }
   setColormap(name) { this.cmap = name; this.render(); }
+  setDisplayScale(x = 1, y = 1) {
+    this.displayScale = { x: scaleValue(x), y: scaleValue(y) };
+    this.render();
+  }
   setVerticalAxisMode(mode = "sample", depthAxis = null) {
     this.verticalAxisMode = mode === "depth" ? "depth" : "sample";
     this.depthAxis = depthAxis;
@@ -109,7 +120,8 @@ export class RadarRenderer {
   }
   zoomFit() {
     if (!this.dataset) return;
-    this.view = { t0: 0, t1: this.dataset.numTraces - 1, s0: 0, s1: this.dataset.numSamples - 1 };
+    this.view = this.defaultView(this.dataset);
+    this.displayScale = { x: 1, y: 1 };
     this.render();
   }
   zoomToSelection(sel) {
@@ -130,7 +142,34 @@ export class RadarRenderer {
     this.w = r.width; this.h = r.height;
     this.render();
   }
-  plot() { return { x: 56, y: 34, w: Math.max(1, this.w - 100), h: Math.max(1, this.h - 76) }; }
+  defaultView(ds = this.dataset) {
+    if (!ds) return null;
+    const nt = Math.max(1, ds.numTraces || 1), ns = Math.max(1, ds.numSamples || 1);
+    const metaView = ds.meta?.displayView || ds.displayView;
+    const fallback = { t0: 0, t1: nt - 1, s0: 0, s1: ns - 1 };
+    if (!metaView) return fallback;
+    const view = {
+      t0: Number(metaView.t0 ?? fallback.t0),
+      t1: Number(metaView.t1 ?? fallback.t1),
+      s0: Number(metaView.s0 ?? fallback.s0),
+      s1: Number(metaView.s1 ?? fallback.s1)
+    };
+    if (![view.t0, view.t1, view.s0, view.s1].every(Number.isFinite)) return fallback;
+    view.t0 = Math.max(0, Math.min(nt - 1, view.t0));
+    view.t1 = Math.max(0, Math.min(nt - 1, view.t1));
+    view.s0 = Math.max(0, Math.min(ns - 1, view.s0));
+    view.s1 = Math.max(0, Math.min(ns - 1, view.s1));
+    if (view.t1 <= view.t0) { view.t0 = fallback.t0; view.t1 = fallback.t1; }
+    if (view.s1 <= view.s0) { view.s0 = fallback.s0; view.s1 = fallback.s1; }
+    return view;
+  }
+  basePlot() { return { x: 56, y: 34, w: Math.max(1, this.w - 100), h: Math.max(1, this.h - 76) }; }
+  plot() {
+    const base = this.basePlot();
+    const sx = scaleValue(this.displayScale?.x), sy = scaleValue(this.displayScale?.y);
+    const w = Math.max(1, base.w * sx), h = Math.max(1, base.h * sy);
+    return { x: base.x + (base.w - w) / 2, y: base.y + (base.h - h) / 2, w, h };
+  }
   dataAt(px, py) {
     if (!this.dataset || !this.view) return null;
     const p = this.plot();
@@ -381,7 +420,7 @@ export class RadarRenderer {
     if (this.pendingAnnotation) drawAnn({ type: "point", t: this.pendingAnnotation.t, s: this.pendingAnnotation.s, label: "1" }, true);
   }
   drawColorbar(p) {
-    const ctx = this.ctx, T = this.theme, fn = maps[this.cmap] || maps.jet, x = p.x + p.w + 8, y = p.y + p.h * .2, h = p.h * .6;
+    const ctx = this.ctx, T = this.theme, fn = maps[this.cmap] || maps.jet, x = p.x + p.w + 8, y = p.y, h = p.h;
     for (let i = 0; i < h; i++) {
       const [r, g, b] = fn(1 - i / h);
       ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fillRect(x, y + i, 12, 1);

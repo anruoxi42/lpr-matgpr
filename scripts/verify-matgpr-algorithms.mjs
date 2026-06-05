@@ -22,6 +22,7 @@ import {
   timeDepth
 } from "../src/processing/algorithms.js";
 import { HCD_DEFAULT_DT_NS, parseHadText, parseHcdFile } from "../src/io/hcd.js";
+import { parse2BFile } from "../src/io/twoB.js";
 import { localMaxima, pickPeaksNearPoint, traceFromSeed } from "../src/processing/peakTracking.js";
 import { generateLayeredDielectric, manualHorizonsToModel, modelToFdtdGrid, prepareFdtdGridFromModel } from "../src/modeling/model2d.js";
 import { calConductivity, calDensity, calLossTangent } from "../src/modeling/materials.js";
@@ -239,6 +240,10 @@ const troughPicked = pickPeaksNearPoint(troughData, 1, 6, { traceIndex: 0, sampl
 assert(troughPicked.length === 1 && troughPicked[0].sampleIndex === 1, "inverted trough picking should match MATLAB -radar_data behavior");
 const seeded = traceFromSeed(peakData, 5, 16, { traceIndex: 2, sampleIndex: 5 }, { halfWindowSamples: 3 });
 assert(seeded.length === 5 && seeded[0].traceIndex === 0 && seeded.at(-1).traceIndex === 4, "seed trace tracking failed");
+const troughSeedData = new Float32Array(3 * 12);
+for (let t = 0; t < 3; t++) troughSeedData[t * 12 + 4 + t] = -10;
+const troughSeeded = traceFromSeed(troughSeedData, 3, 12, { traceIndex: 1, sampleIndex: 5 }, { halfWindowSamples: 2, invert: true });
+assert(troughSeeded.length === 3 && troughSeeded.every((p, i) => p.sampleIndex === 4 + i), "inverted seed trace tracking failed");
 
 const density = calDensity(9);
 const lt = calLossTangent(density);
@@ -308,8 +313,37 @@ if (existsSync(hdf5PulsePath)) {
   assert(hdf5Rejected, "MATLAB 7.3/HDF5 pulse fixture should fail with an explicit message");
 }
 
+const discoveredTrackingMatPath = findFileByName(softwareRoot, "data_correct.mat");
+if (discoveredTrackingMatPath) {
+  const vars = await parseMatFileAsync(arrayBufferFromNodeBuffer(readFileSync(discoveredTrackingMatPath)));
+  assert(vars.data?.type === "int16" && vars.data.rows === 486 && vars.data.cols === 2563, "int16 MATLAB radar matrix was not parsed with correct dimensions");
+  assert(vars.data.data[0] === -346 && vars.data.data[1] === 258, "int16 MATLAB radar matrix values were decoded incorrectly");
+}
+const sampleTwoBPath = join(softwareRoot, "N105-N208.2b");
+if (existsSync(sampleTwoBPath)) {
+  const twoB = parse2BFile(arrayBufferFromNodeBuffer(readFileSync(sampleTwoBPath)));
+  assert(twoB.numTraces === 1612 && twoB.numSamples === 2048, ".2B sample dimensions are wrong");
+  assert(twoB.meta.dxM > 0 && twoB.meta.dxM < 1, ".2B invalid position metadata should fall back to a reasonable trace spacing");
+}
+
 function arrayBufferFromNodeBuffer(buffer) {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
+function findFileByName(rootDir, fileName, maxDepth = 4) {
+  function walk(dir, depth) {
+    if (depth > maxDepth) return null;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isFile() && entry.name === fileName) return path;
+      if (entry.isDirectory()) {
+        const found = walk(path, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+  return walk(rootDir, 0);
 }
 
 const chDir = join(root, "..", "ch");

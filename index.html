@@ -135,6 +135,8 @@
           <button data-action="zoom-in" title="放大">Zoom + 放大</button>
           <button data-action="zoom-out" title="缩小">Zoom - 缩小</button>
           <button data-action="zoom-fit" title="全图">Fit 全图</button>
+          <label class="scale-control">比例 X<input id="radar-scale-x" type="number" value="1" min="0.2" max="1" step="0.05"></label>
+          <label class="scale-control">Y<input id="radar-scale-y" type="number" value="1" min="0.2" max="1" step="0.05"></label>
           <span class="sep"></span>
           <button class="radar-tool" data-radar-mode="measure">测量</button>
           <button class="radar-tool" data-radar-mode="select">选区</button>
@@ -507,6 +509,7 @@
             <button data-manual-tool="erase">Erase 橡皮</button>
             <button data-manual-tool="seed">Seed trace 种子追踪</button>
             <label class="toggle-label"><input type="checkbox" id="manual-snap" checked> Snap 吸附</label>
+            <label class="toggle-label"><input type="checkbox" id="manual-connect"> Connect 连线</label>
             <label>pick_radius <input id="manual-pick-radius" type="number" value="3" min="0" max="30" step="1"></label>
           </div>
           <div class="manual-geo-actions">

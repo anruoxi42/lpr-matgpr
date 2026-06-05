@@ -230,6 +230,7 @@ label:has(select), label:has(input) { text-transform: none; font-size: 12px; col
 }
 .toolbar label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 11px; color: var(--t2); text-transform: none; }
 .toolbar input, .toolbar select { width: 90px; padding: 4px 7px; font-size: 12px; }
+.toolbar .scale-control input { width: 56px; }
 .toolbar .sep { width: 1px; height: 20px; background: var(--bd-divider); display: inline-block; margin: 0 2px; }
 .toolbar button.active, .radar-tool.active {
   border-color: var(--bd-focus); background: var(--gold-bg); color: var(--gold);

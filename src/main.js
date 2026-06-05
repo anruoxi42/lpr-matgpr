@@ -160,6 +160,7 @@ function refresh() {
   $("#dataset-title").textContent = store.ipd ? `${store.ipd.name} · ${displaySource === "output" && store.output ? "Output Data" : "Current Input Data"}` : "未加载数据";
   $("#drop-zone").classList.toggle("hidden", !!store.current);
   radar.setDataset(ds);
+  syncRadarScaleControls();
   applyDepthAxisMode();
   $("#state-panel").innerHTML = store.ipd ? [
     row("Current", `${store.current.numTraces} 道 × ${store.current.numSamples} 样点`),
@@ -403,6 +404,30 @@ function applyDepthAxisMode() {
   $("#depth-axis-toggle")?.classList.toggle("active", depthAxisEnabled);
 }
 
+function radarScaleValue(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0.2, Math.min(1, n)) : 1;
+}
+
+function syncRadarScaleControls() {
+  const sx = radarScaleValue(radar.displayScale?.x);
+  const sy = radarScaleValue(radar.displayScale?.y);
+  if ($("#radar-scale-x")) $("#radar-scale-x").value = sx.toFixed(2).replace(/\.?0+$/, "");
+  if ($("#radar-scale-y")) $("#radar-scale-y").value = sy.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function applyRadarDisplayScale() {
+  const sx = radarScaleValue($("#radar-scale-x")?.value);
+  const sy = radarScaleValue($("#radar-scale-y")?.value);
+  radar.setDisplayScale(sx, sy);
+  syncRadarScaleControls();
+}
+
+function resetRadarViewAndScale() {
+  radar.zoomFit();
+  syncRadarScaleControls();
+}
+
 function fileExt(name) {
   const match = String(name || "").toLowerCase().match(/\.[^.]+$/);
   return match ? match[0] : "";
@@ -415,11 +440,21 @@ function fileStem(name) {
 function finishImport(parsed, file) {
   const enriched = buildRadarMetadata({ ...parsed, name: file.name, fileSize: file.size, loadedAt: new Date().toLocaleString("zh-CN") });
   store.loadDataset(enriched);
-  if (parsed.meta?.sourceFormat === ".HCD") {
+  if (Number.isFinite(Number(parsed.meta?.displayAmpMin)) && Number.isFinite(Number(parsed.meta?.displayAmpMax))) {
+    $("#amp-min").value = parsed.meta.displayAmpMin;
+    $("#amp-max").value = parsed.meta.displayAmpMax;
+    radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
+  } else if (parsed.meta?.sourceFormat === ".HCD") {
     $("#amp-min").value = parsed.meta.displayAmpMin ?? HCD_DEFAULT_AMP.min;
     $("#amp-max").value = parsed.meta.displayAmpMax ?? HCD_DEFAULT_AMP.max;
     radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
   }
+  if (parsed.meta?.displayColormap) {
+    const cmap = String(parsed.meta.displayColormap);
+    if ($("#colormap")) $("#colormap").value = cmap;
+    radar.setColormap(cmap);
+  }
+  syncRadarScaleControls();
   clearInteractionState();
   toast(`${file.name} 导入成功`);
   $("#footer-status").textContent = "导入完成";
@@ -471,6 +506,146 @@ function matMeta(vars, numTraces, numSamples, fileName) {
   }
   return { sourceFormat: ".MAT", radarParams: rp, headerSuggestions: { sourceFormat: ".MAT", dtNs: dt, dxM: dx } };
 }
+
+function isMatNumericMatrix(value) {
+  if (!value || typeof value !== "object" || !ArrayBuffer.isView(value.data)) return false;
+  const rows = Math.floor(Number(value.rows));
+  const cols = Math.floor(Number(value.cols));
+  if (rows < 1 || cols < 1 || rows * cols < 2) return false;
+  const dims = Array.isArray(value.dims) ? value.dims : [rows, cols];
+  if (dims.slice(2).some(d => Number(d) > 1)) return false;
+  return value.data.length >= rows * cols;
+}
+
+function matMatrixScore(name, value) {
+  const lower = String(name || "").toLowerCase();
+  const cells = Math.max(1, Math.floor(value.rows || 1) * Math.floor(value.cols || 1));
+  let score = Math.log10(cells + 1);
+  if (/(radar|radar_?gram|radar_?data|data|echo|profile|section|gram)/i.test(lower)) score += 10;
+  if (/^(x|z|t|dt|dx|tt2w|src_values|distance|distance_array_m|time_array_ns|velocity|epsilon|header|params)$/i.test(lower)) score -= 12;
+  if (value.rows === 1 || value.cols === 1) score -= 4;
+  return score;
+}
+
+function matMatrixToTraceMajor(value) {
+  const numSamples = Math.max(1, Math.floor(Number(value.rows)));
+  const numTraces = Math.max(1, Math.floor(Number(value.cols)));
+  const out = new Float32Array(numTraces * numSamples);
+  const src = value.data;
+  let invalid = 0;
+  for (let t = 0; t < numTraces; t++) {
+    for (let s = 0; s < numSamples; s++) {
+      const v = Number(src[s + t * numSamples]);
+      if (Number.isFinite(v)) out[t * numSamples + s] = v;
+      else invalid++;
+    }
+  }
+  return { data: out, numTraces, numSamples, invalidSamples: invalid };
+}
+
+function matArrayValues(value) {
+  if (value && typeof value === "object" && ArrayBuffer.isView(value.data)) return value.data;
+  return null;
+}
+
+function matScalar(vars, names, fallback) {
+  for (const name of names) {
+    const value = vars[name];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    const data = matArrayValues(value);
+    if (data?.length && Number.isFinite(Number(data[0]))) return Number(data[0]);
+  }
+  return fallback;
+}
+
+function medianStep(values) {
+  if (!values?.length || values.length < 2) return NaN;
+  const steps = [];
+  for (let i = 1; i < values.length; i++) {
+    const a = Number(values[i - 1]), b = Number(values[i]);
+    const d = Math.abs(b - a);
+    if (Number.isFinite(d) && d > 0) steps.push(d);
+  }
+  steps.sort((a, b) => a - b);
+  return steps.length ? steps[Math.floor(steps.length / 2)] : NaN;
+}
+
+function robustDisplayRange(data, lowQ = 0.02, highQ = 0.98) {
+  const values = [];
+  const stride = Math.max(1, Math.floor((data?.length || 0) / 200000));
+  for (let i = 0; i < (data?.length || 0); i += stride) {
+    const v = Number(data[i]);
+    if (Number.isFinite(v)) values.push(v);
+  }
+  if (!values.length) return { min: -10, max: 10 };
+  values.sort((a, b) => a - b);
+  let min = values[Math.floor((values.length - 1) * lowQ)];
+  let max = values[Math.floor((values.length - 1) * highQ)];
+  if (!(max > min)) { min = values[0]; max = values[values.length - 1]; }
+  if (!(max > min)) { min -= 1; max += 1; }
+  if (min < 0 && max > 0) {
+    const abs = Math.max(Math.abs(min), Math.abs(max));
+    min = -abs; max = abs;
+  }
+  return { min: Number(min.toPrecision(6)), max: Number(max.toPrecision(6)) };
+}
+
+function isMatlabTrackingMatrix(name, value, matrix) {
+  return String(name || "").toLowerCase() === "data"
+    && String(value?.type || "").toLowerCase() === "int16"
+    && matrix?.numSamples === 486
+    && matrix?.numTraces === 2563;
+}
+
+readMatImport = async function readMatImportV2(file) {
+  $("#footer-status").textContent = "姝ｅ湪瑙ｆ瀽 " + file.name;
+  const buf = await file.arrayBuffer();
+  const variables = await parseMatFileAsync(buf);
+  const candidates = Object.entries(variables).filter(([, v]) => isMatNumericMatrix(v));
+  if (!candidates.length) throw new Error("MAT file does not contain a supported 2-D numeric matrix.");
+  candidates.sort((a, b) => matMatrixScore(b[0], b[1]) - matMatrixScore(a[0], a[1]));
+  const [variableName, variable] = candidates[0];
+  const matrix = matMatrixToTraceMajor(variable);
+  const matlabDisplay = isMatlabTrackingMatrix(variableName, variable, matrix);
+  const display = matlabDisplay ? { min: -100, max: 100 } : robustDisplayRange(matrix.data, 0.04, 0.96);
+  const displayView = matlabDisplay ? { t0: 0, t1: matrix.numTraces - 1, s0: 0, s1: Math.min(170, matrix.numSamples - 1) } : null;
+  const meta = matMeta(variables, matrix.numTraces, matrix.numSamples, file.name, { variableName, variable, display, displayView, matlabDisplay });
+  finishImport({ ...matrix, meta, name: file.name }, file);
+};
+
+matMeta = function matMetaV2(vars, numTraces, numSamples, fileName, info = {}) {
+  const scalarDt = matScalar(vars, ["dt_ns", "dtNs", "dt"], 0.3125);
+  let dt = scalarDt < 1e-3 ? scalarDt * 1e9 : scalarDt;
+  const timeAxis = matArrayValues(vars.time_array_ns) || matArrayValues(vars.tt2w) || matArrayValues(vars.t);
+  const timeStep = medianStep(timeAxis);
+  if (Number.isFinite(timeStep)) dt = timeStep < 1e-3 ? timeStep * 1e9 : timeStep;
+  const distanceAxis = matArrayValues(vars.distance_array_m) || matArrayValues(vars.x) || matArrayValues(vars.src_values);
+  const dxFromAxis = medianStep(distanceAxis);
+  const dx = Number.isFinite(dxFromAxis) ? dxFromAxis : matScalar(vars, ["dx_m", "dxM", "dx"], 0.05);
+  const v = matScalar(vars, ["velocity_m_ns", "velocityMPerNs", "velocity"], 0.1);
+  const rp = { dtNs: dt, dxM: dx, velocityMPerNs: v, epsilonR: (0.299792458 / v) * (0.299792458 / v), vofhText: v + ",0" };
+  const suggestions = {
+    sourceFormat: ".MAT",
+    variable: info.variableName || "",
+    matrixDims: info.variable?.dims?.join("x") || `${numSamples}x${numTraces}`,
+    numericType: info.variable?.type || "",
+    dtNs: dt,
+    dxM: dx,
+    fileName
+  };
+  return {
+    sourceFormat: ".MAT",
+    radarParams: rp,
+    headerSuggestions: suggestions,
+    displayAmpMin: info.display?.min ?? -10,
+    displayAmpMax: info.display?.max ?? 10,
+    displayColormap: "gray",
+    ...(info.displayView ? { displayView: info.displayView } : {}),
+    matVariableName: info.variableName || "",
+    matNumericType: info.variable?.type || "",
+    matlabDisplayDefaults: !!info.matlabDisplay
+  };
+};
 
 
 async function importFiles(files) {
@@ -1896,7 +2071,7 @@ function ensureManualState() {
   const ds = currentDisplayed();
   const id = manualDatasetId(ds);
   if (!manualInterpretationState || manualInterpretationState.datasetId !== id) {
-    manualInterpretationState = { datasetId: id, activeLayerId: "", layers: [], displayMode: "radar", snapEnabled: true, cursorTrace: 0, history: [], future: [], view: null };
+    manualInterpretationState = { datasetId: id, activeLayerId: "", layers: [], displayMode: "radar", snapEnabled: true, connectEnabled: false, cursorTrace: 0, history: [], future: [], view: null };
     manualFeatureResult = null;
     manualModelResult = null;
     manualCanvasRender = null;
@@ -2199,33 +2374,38 @@ function drawManualWorkbench() {
   drawManualModelWindow();
   const depthStatus = $("#manual-depth-status");
   if (depthStatus) depthStatus.textContent = `Depth max ${manualProfileDepthMax(ds).toFixed(2)} m · dt ${rp.dtNs.toFixed(4)} ns · v ${rp.velocityMPerNs.toFixed(3)} m/ns`;
+  if ($("#manual-snap")) $("#manual-snap").checked = !!st.snapEnabled;
+  if ($("#manual-connect")) $("#manual-connect").checked = !!st.connectEnabled;
   syncManualViewControls(view);
 }
 
-function drawManualLayersOnRender(render, layers, activeLayerId = "") {
+function drawManualLayersOnRender(render, layers, activeLayerId = "", options = {}) {
   if (!render) return;
   const ctx = render.ctx, { plot } = render.layout;
+  const connect = !!options.connectEnabled;
   ctx.save();
   ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
-  ctx.lineWidth = 2;
+  ctx.lineWidth = connect ? 1.4 : 1;
   ctx.font = "12px Consolas";
   for (const layer of layers || []) {
     if (!layer.visible || !layer.points.length) continue;
     ctx.strokeStyle = layer.color;
     ctx.fillStyle = layer.color;
     ctx.globalAlpha = layer.source === "auto" ? 0.58 : 0.95;
-    ctx.beginPath();
-    layer.points.forEach((p, i) => {
-      const x = traceToPlotX(p.traceIndex, render);
-      const y = sampleToPlotY(p.sampleIndex, render);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    ctx.stroke();
+    if (connect && layer.points.length > 1) {
+      ctx.beginPath();
+      layer.points.forEach((p, i) => {
+        const x = traceToPlotX(p.traceIndex, render);
+        const y = sampleToPlotY(p.sampleIndex, render);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.stroke();
+    }
     for (const p of layer.points) {
       if (p.traceIndex < render.scale.traceStart || p.traceIndex > render.scale.traceEnd || p.sampleIndex < render.scale.sampleStart || p.sampleIndex > render.scale.sampleEnd) continue;
       const x = traceToPlotX(p.traceIndex, render);
       const y = sampleToPlotY(p.sampleIndex, render);
-      ctx.beginPath(); ctx.arc(x, y, layer.id === activeLayerId ? 3.5 : 2.2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, layer.id === activeLayerId ? 2.4 : 1.4, 0, Math.PI * 2); ctx.fill();
     }
     const first = layer.points.find(p => p.traceIndex >= render.scale.traceStart && p.traceIndex <= render.scale.traceEnd && p.sampleIndex >= render.scale.sampleStart && p.sampleIndex <= render.scale.sampleEnd);
     if (first) ctx.fillText(layer.name, traceToPlotX(first.traceIndex, render) + 4, sampleToPlotY(first.sampleIndex, render) - 6);
@@ -2236,7 +2416,7 @@ function drawManualLayersOnRender(render, layers, activeLayerId = "") {
 
 function drawManualLayerOverlay() {
   const st = ensureManualState();
-  drawManualLayersOnRender(manualCanvasRender, st.layers, st.activeLayerId);
+  drawManualLayersOnRender(manualCanvasRender, st.layers, st.activeLayerId, { connectEnabled: st.connectEnabled });
 }
 
 function renderManualLayerList() {
@@ -2479,7 +2659,7 @@ function renderManualProfileExportCanvas(width = 1600, height = 900) {
     distanceStep: rp.dxM,
     horizons: ($("#manual-display-mode")?.value || st.displayMode) === "auto" ? geologyResult?.horizons || [] : []
   });
-  drawManualLayersOnRender(render, st.layers, st.activeLayerId);
+  drawManualLayersOnRender(render, st.layers, st.activeLayerId, { connectEnabled: st.connectEnabled });
   return canvas;
 }
 
@@ -2827,7 +3007,7 @@ function bindUi() {
     if (action === "open-import") $("#file-input").click();
     if (action === "zoom-in") radar.zoomIn();
     if (action === "zoom-out") radar.zoomOut();
-    if (action === "zoom-fit" || action === "radar-reset") radar.zoomFit();
+    if (action === "zoom-fit" || action === "radar-reset") resetRadarViewAndScale();
     if (action === "toggle-depth-axis") { depthAxisEnabled = !depthAxisEnabled; applyDepthAxisMode(); toast(depthAxisEnabled ? "纵轴已切换为深度" : "纵轴已恢复为采样点/时间"); }
     if (action === "selection-extract") extractSelections();
     if (action === "selection-clear") clearSelections();
@@ -2894,8 +3074,13 @@ function bindUi() {
   $("#manual-cmap")?.addEventListener("change", readManualViewControls);
   $("#manual-min")?.addEventListener("change", readManualViewControls);
   $("#manual-max")?.addEventListener("change", readManualViewControls);
-  $("#manual-snap")?.addEventListener("change", e => { ensureManualState().snapEnabled = e.target.checked; });
+  $("#manual-snap")?.addEventListener("change", e => { ensureManualState().snapEnabled = e.target.checked; drawManualWorkbench(); });
+  $("#manual-connect")?.addEventListener("change", e => { ensureManualState().connectEnabled = e.target.checked; drawManualWorkbench(); });
   $("#manual-pick-radius")?.addEventListener("input", () => drawManualWorkbench());
+  $("#radar-scale-x")?.addEventListener("change", applyRadarDisplayScale);
+  $("#radar-scale-y")?.addEventListener("change", applyRadarDisplayScale);
+  $("#radar-scale-x")?.addEventListener("input", applyRadarDisplayScale);
+  $("#radar-scale-y")?.addEventListener("input", applyRadarDisplayScale);
   $("#colormap").onchange = e => radar.setColormap(e.target.value);
   $("#amp-min").onchange = () => radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
   $("#amp-max").onchange = () => radar.setAmp(Number($("#amp-min").value), Number($("#amp-max").value));
@@ -3391,15 +3576,16 @@ manualSnapPoint = function manualSnapPointV2(point) {
 
 manualAutoTraceFromSeed = function manualAutoTraceFromSeedV2(seed) {
   const ds = currentDisplayed();
-  const prob = manualFeatureResult?.boundaryProbability || manualFeatureResult?.data;
-  if (!ds || !prob?.length) return toast("Compute aids before seed tracing.", "warn");
+  const src = manualPeakPickSource(ds);
+  if (!ds || !src.data?.length) return toast("Import data before seed tracing.", "warn");
   const layer = createManualLayer("snapped");
   layer.name = `Seed ${layer.name}`;
-  layer.points = traceFromSeed(prob, ds.numTraces, ds.numSamples, seed, {
+  layer.points = traceFromSeed(src.data, ds.numTraces, ds.numSamples, seed, {
     halfWindowSamples: Math.max(8, Math.round(0.5 / manualDepthStep(ds))),
     startSample: 1,
     endSample: manualSampleMax(ds),
-    directionPenalty: 0.08
+    directionPenalty: 0.08,
+    invert: src.invert
   }).map(p => enrichManualPoint({ ...p, source: "snapped" }, ds));
   sortLayerPoints(layer);
   drawManualWorkbench();

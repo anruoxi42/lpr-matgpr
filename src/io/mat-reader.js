@@ -131,38 +131,43 @@ function readNumericArray(dv, tag, dims, mxClass) {
   if (tag.type === MI_DOUBLE) {
     const out = new Float64Array(nel);
     for (let i = 0; i < nel; i++) out[i] = dv.getFloat64(off + i * 8, true);
-    return wrap(out, rows, cols, "double");
+    return wrap(out, rows, cols, "double", dims);
   }
   if (tag.type === MI_SINGLE) {
     const out = new Float32Array(nel);
     for (let i = 0; i < nel; i++) out[i] = dv.getFloat32(off + i * 4, true);
-    return wrap(out, rows, cols, "single");
+    return wrap(out, rows, cols, "single", dims);
   }
   if (tag.type === MI_INT32) {
     const out = new Int32Array(nel);
     for (let i = 0; i < nel; i++) out[i] = dv.getInt32(off + i * 4, true);
-    return wrap(out, rows, cols, "int32");
+    return wrap(out, rows, cols, "int32", dims);
   }
   if (tag.type === MI_UINT32) {
     const out = new Uint32Array(nel);
     for (let i = 0; i < nel; i++) out[i] = dv.getUint32(off + i * 4, true);
-    return wrap(out, rows, cols, "uint32");
+    return wrap(out, rows, cols, "uint32", dims);
+  }
+  if (tag.type === MI_INT16) {
+    const out = new Int16Array(nel);
+    for (let i = 0; i < nel; i++) out[i] = dv.getInt16(off + i * 2, true);
+    return wrap(out, rows, cols, "int16", dims);
   }
   if (tag.type === MI_UINT16 || mxClass === MX_CHAR) {
     const out = new Uint16Array(nel);
     for (let i = 0; i < nel; i++) out[i] = dv.getUint16(off + i * 2, true);
     if (mxClass === MX_CHAR) return String.fromCharCode(...out).replace(/\0/g, "").trim();
-    return wrap(out, rows, cols, "uint16");
+    return wrap(out, rows, cols, "uint16", dims);
   }
   if (tag.type === MI_UINT8) {
-    return wrap(Uint8Array.from(new Uint8Array(dv.buffer, dv.byteOffset + off, nel)), rows, cols, "uint8");
+    return wrap(Uint8Array.from(new Uint8Array(dv.buffer, dv.byteOffset + off, nel)), rows, cols, "uint8", dims);
   }
   if (tag.type === MI_INT8) {
-    return wrap(Int8Array.from(new Int8Array(dv.buffer, dv.byteOffset + off, nel)), rows, cols, "int8");
+    return wrap(Int8Array.from(new Int8Array(dv.buffer, dv.byteOffset + off, nel)), rows, cols, "int8", dims);
   }
   const fallback = new Float32Array(nel);
   for (let i = 0; i < Math.min(nel, Math.floor(tag.bytes / 4)); i++) fallback[i] = dv.getFloat32(off + i * 4, true);
-  return wrap(fallback, rows, cols, "single");
+  return wrap(fallback, rows, cols, "single", dims);
 }
 
 async function inflateBytes(bytes) {
@@ -174,9 +179,9 @@ async function inflateBytes(bytes) {
   return Uint8Array.from(zlib.inflateSync(bytes));
 }
 
-function wrap(data, rows, cols, type) {
+function wrap(data, rows, cols, type, dims = [rows, cols]) {
   if (rows === 1 && cols === 1 && typeof data[0] === "number") return data[0];
-  return { data, rows, cols, type, length: data.length };
+  return { data, rows, cols, dims: Array.from(dims || [rows, cols]), type, length: data.length };
 }
 
 function normalizeBytes(arrayBuffer) {
