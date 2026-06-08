@@ -431,11 +431,11 @@ label:has(select), label:has(input) { text-transform: none; font-size: 12px; col
 .layer-material-row input { padding:4px 5px; font-size:11px; }
 .p5-boundary-grid, .p5-layer-values {
   display:grid;
-  grid-template-columns:repeat(auto-fit, minmax(86px, 1fr));
+  grid-template-columns:repeat(auto-fit, minmax(132px, 1fr));
   gap:6px;
   margin:8px 0;
 }
-.p5-boundary-grid label, .p5-layer-values label { margin:0; min-width:0; font-size:10px; }
+.p5-boundary-grid label, .p5-layer-values label { margin:0; min-width:0; font-size:10px; line-height:1.35; }
 .p5-boundary-grid input, .p5-boundary-grid select, .p5-layer-values input { padding:5px 6px; font-size:11px; }
 
 /* ═══════════ MANUAL GEO ═══════════ */

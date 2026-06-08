@@ -31,6 +31,8 @@ let modelToolDefaults = { circleRadiusM: 0.25, pipeRadiusM: 0.18, rectangleWidth
 let fdtdSrcPulse = null;
 let fdtdP5Preset = false;
 let randomP5State = { activeStep: "p5_1", dielectric: null, model2d: null, fdtd: null, params: null };
+const MODEL_MATERIAL_IDS = new Set(MATERIAL_PRESETS.map(m => m.id));
+const MODEL_TYPE_LABELS = { circle: "圆形", rectangle: "矩形", pipe: "管道", polygon: "多边形", ellipse: "椭圆" };
 let radarSelections = [];
 let radarAnnotations = [];
 let lastMergedSelection = null;
@@ -3564,6 +3566,22 @@ function depthMajorToTraceDataset(data, nx, nz, name = "model") {
   return { data: out, numTraces: nx, numSamples: nz, name };
 }
 
+function p5GridDepthOptions(numSamples, intDis, depthStart = 0) {
+  const step = Math.max(1e-12, Number(intDis) || 0.02);
+  const start = Number.isFinite(Number(depthStart)) ? Number(depthStart) : 0;
+  const end = start + Math.max(0, Number(numSamples || 1) - 1) * step;
+  return { depthStep: step, depthStart: start, depthEnd: end, depthMax: Math.max(1e-9, end) };
+}
+
+function p5ModelDepthOptions(model2d, fallbackStep = 0.02) {
+  const zAxis = model2d?.depthAxisM || [];
+  const start = Number(zAxis[0]);
+  const end = Number(zAxis[zAxis.length - 1]);
+  const step = Math.max(1e-12, Number(model2d?.depthStepM || model2d?.depthStep || fallbackStep) || fallbackStep);
+  if (Number.isFinite(start) && Number.isFinite(end)) return { depthStep: step, depthStart: start, depthEnd: end, depthMax: Math.max(1e-9, end) };
+  return p5GridDepthOptions(model2d?.nz || model2d?.numSamples || 1, step);
+}
+
 function p5BoundaryHorizons(boundaries, intDis, offset = 0) {
   return (boundaries || []).map((line, i) => ({ name: `B${i + 1}`, line: Float32Array.from(line || [], v => offset + Number(v) * intDis) }));
 }
@@ -3580,11 +3598,11 @@ function renderRandomP5Workbench() {
   } else if (randomP5State.model2d?.epsrField?.length && randomP5State.activeStep !== "p5_1") {
     const m = randomP5State.model2d;
     ds = depthMajorToTraceDataset(m.epsrField, m.nx, m.nz, "p5_2_Model");
-    opts = { ...opts, min: 1, max: Math.max(...Array.from(params.layerValues || [5])) + 1, horizons: p5BoundaryHorizons(randomP5State.dielectric?.boundaries, params.IntDis || 0.02, -Math.max(0, params.airRows || 30) * (params.IntDis || 0.02)) };
+    opts = { ...opts, ...p5ModelDepthOptions(m, params.IntDis || 0.02), min: 1, max: Math.max(...Array.from(params.layerValues || [5])) + 1, horizons: p5BoundaryHorizons(randomP5State.dielectric?.boundaries, params.IntDis || 0.02, -Math.max(0, params.airRows || 30) * (params.IntDis || 0.02)) };
   } else if (randomP5State.dielectric?.data?.length) {
     const d = randomP5State.dielectric;
     ds = depthMajorToTraceDataset(d.data, d.numTraces, d.numSamples, "p5_1_dielectric");
-    opts = { ...opts, min: 1, max: Math.max(...Array.from(params.layerValues || [5])) + 1, horizons: p5BoundaryHorizons(d.boundaries, params.IntDis || 0.02) };
+    opts = { ...opts, ...p5GridDepthOptions(d.numSamples, params.IntDis || d.depthStep || 0.02), min: 1, max: Math.max(...Array.from(params.layerValues || [5])) + 1, horizons: p5BoundaryHorizons(d.boundaries, params.IntDis || 0.02) };
   }
   if (ds) {
     renderDatasetCanvas(canvas, ds, opts);
@@ -3700,13 +3718,39 @@ function modelSourceHorizons() {
   return [];
 }
 
+function createModelObjectId() {
+  return `O${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+function ensureUniqueModelObjectIds() {
+  const objects = Array.isArray(model.objects) ? model.objects : [];
+  const seen = new Set();
+  let replacementForSelected = "";
+  model.objects = objects.map((object, index) => {
+    const originalId = String(object?.id || "");
+    const materialId = object?.materialId || (MODEL_MATERIAL_IDS.has(originalId) ? originalId : "custom");
+    const normalized = normalizeObject({ ...object, materialId });
+    let id = String(normalized.id || "");
+    if (!id || MODEL_MATERIAL_IDS.has(id) || seen.has(id)) id = createModelObjectId();
+    normalized.id = id;
+    seen.add(id);
+    if (selectedModelObjectId && originalId === selectedModelObjectId && !replacementForSelected) replacementForSelected = id;
+    if (!normalized.name || normalized.name === normalized.type) normalized.name = `${MODEL_TYPE_LABELS[normalized.type] || normalized.type} ${index + 1}`;
+    return normalized;
+  });
+  if (selectedModelObjectId && !model.objects.some(o => o.id === selectedModelObjectId)) {
+    selectedModelObjectId = replacementForSelected || "";
+  }
+  return model.objects;
+}
+
 function rebuildModel2d() {
   if (!model2dDirty && model2dResult) return model2dResult;
   const opts = currentModelOptions();
   ensureModelLayerMaterials(currentModelLayerCount());
   model.layerMaterials[0] = { ...model.layerMaterials[0], ...opts.background };
   model.background = { ...model.layerMaterials[0] };
-  model.objects = (model.objects || []).map(normalizeObject);
+  ensureUniqueModelObjectIds();
   model2dResult = manualHorizonsToModel(modelSourceHorizons(), { ...opts, layerMaterials: model.layerMaterials, objects: model.objects });
   model2dDirty = false;
   return model2dResult;
@@ -3938,8 +3982,13 @@ function drawDraftPolygon(ctx, rect, result) {
 function renderModelList() {
   const list = $("#model-list");
   if (!list) return;
+  ensureUniqueModelObjectIds();
   if (!model.objects.length) { list.innerHTML = "No model objects."; return; }
-  list.innerHTML = model.objects.map((o, i) => `<div class="model-object-row${o.id === selectedModelObjectId ? " active" : ""}"><button data-model-select-index="${i}">${i + 1}. ${escapeHtml(o.name || o.type)} #${escapeHtml(String(o.id || "").slice(-5))} εr=${materialNumber(o.epsr)}</button><button data-model-delete-index="${i}">Del</button></div>`).join("");
+  list.innerHTML = model.objects.map((o, i) => {
+    const typeLabel = MODEL_TYPE_LABELS[o.type] || o.type;
+    const objectId = String(o.id || "");
+    return `<div class="model-object-row${objectId === selectedModelObjectId ? " active" : ""}"><button data-model-select-index="${i}">${i + 1}. ${escapeHtml(typeLabel)} ${escapeHtml(objectId)} εr=${materialNumber(o.epsr)}</button><button data-model-delete-index="${i}">Del</button></div>`;
+  }).join("");
   $$("[data-model-select-index]").forEach(btn => btn.onclick = () => {
     const object = model.objects[Number(btn.dataset.modelSelectIndex)];
     selectedModelObjectId = object?.id || "";
@@ -3960,6 +4009,7 @@ function renderModelList() {
 }
 
 function syncModelObjectForm() {
+  ensureUniqueModelObjectIds();
   const object = model.objects.find(o => o.id === selectedModelObjectId) || null;
   for (const id of ["model-object-type","model-object-x","model-object-z","model-object-width","model-object-height","model-object-radius","model-object-epsr","model-object-sigma","model-object-mu"]) { const el = $(`#${id}`); if (el) el.disabled = !object; }
   if (!object) return;
@@ -3967,30 +4017,33 @@ function syncModelObjectForm() {
 }
 
 function updateSelectedModelObject() {
+  ensureUniqueModelObjectIds();
   const object = model.objects.find(o => o.id === selectedModelObjectId);
   if (!object) return;
   Object.assign(object, normalizeObject({ ...object, type: $("#model-object-type")?.value || object.type, xM: Number($("#model-object-x")?.value), zM: Number($("#model-object-z")?.value), widthM: Number($("#model-object-width")?.value), heightM: Number($("#model-object-height")?.value), radiusM: Number($("#model-object-radius")?.value), epsr: Number($("#model-object-epsr")?.value), sigma: Number($("#model-object-sigma")?.value), mu: Number($("#model-object-mu")?.value) }));
   markModel2dDirty();
   renderModel();
+  syncModelObjectForm();
 }
 
 function addModelObject(type, world) {
   const preset = type === "pipe" ? MATERIAL_PRESETS.find(m => m.id === "pipe") : MATERIAL_PRESETS.find(m => m.id === "rock");
+  const material = preset ? { materialId: preset.id, name: preset.name, epsr: preset.epsr, sigma: preset.sigma, mu: preset.mu } : { materialId: "custom" };
   const object = normalizeObject({
-    id: `O${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`,
     type,
     xM: world.xM,
     zM: world.zM,
     widthM: type === "rectangle" ? modelToolDefaults.rectangleWidthM : 0.5,
     heightM: type === "rectangle" ? modelToolDefaults.rectangleHeightM : 0.5,
     radiusM: type === "pipe" ? modelToolDefaults.pipeRadiusM : modelToolDefaults.circleRadiusM,
-    materialId: preset?.id,
-    ...(preset || {})
+    ...material,
+    id: createModelObjectId()
   });
   model.objects.push(object); selectedModelObjectId = object.id; markModel2dDirty(); renderModel(); syncModelObjectForm();
 }
 
 function hitModelObjects(world) {
+  ensureUniqueModelObjectIds();
   const hits = [];
   for (let i = model.objects.length - 1; i >= 0; i--) {
     if (modelObjectContains(world, normalizeObject(model.objects[i]))) hits.push(model.objects[i]);
@@ -4078,7 +4131,7 @@ bindModel = function bindModelV2() {
     e.preventDefault();
     if (modelDraftPolygon.length < 3) { toast("多边形至少需要 3 个点", "warn"); return; }
     const c = polygonCenter(modelDraftPolygon);
-    const object = normalizeObject({ id: `O${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`, type: "polygon", points: modelDraftPolygon, xM: c.xM, zM: c.zM, epsr: 12, sigma: 0.001, mu: 1 });
+    const object = normalizeObject({ id: createModelObjectId(), type: "polygon", materialId: "custom", points: modelDraftPolygon, xM: c.xM, zM: c.zM, epsr: 12, sigma: 0.001, mu: 1 });
     model.objects.push(object); selectedModelObjectId = object.id; modelDraftPolygon = []; markModel2dDirty(); renderModel(); syncModelObjectForm();
   });
   cv.addEventListener("wheel", e => {

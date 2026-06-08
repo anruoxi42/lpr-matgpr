@@ -385,48 +385,48 @@
           </div>
           <button data-action="p5-run-step" class="primary">运行当前步骤并导出 MAT</button>
           <h3>p5_1 参数</h3>
-          <label>矩阵尺寸<input id="p5-size" class="p5-control" type="number" value="1000" min="33" step="2"></label>
-          <label>IntDis m<input id="p5-intdis" class="p5-control" type="number" value="0.02" min="0.001" step="0.001"></label>
+          <label>矩阵网格数<input id="p5-size" class="p5-control" type="number" value="1000" min="33" step="2"></label>
+          <label>网格间距 IntDis (m)<input id="p5-intdis" class="p5-control" type="number" value="0.02" min="0.001" step="0.001"></label>
           <label>随机种子<input id="p5-seed" class="p5-control" type="number" value="12345" step="1"></label>
           <div class="p5-layer-values">
-            <label>层0<input id="p5-layer-0" class="p5-control" type="number" value="1" step="0.1"></label>
-            <label>层1<input id="p5-layer-1" class="p5-control" type="number" value="2" step="0.1"></label>
-            <label>层2<input id="p5-layer-2" class="p5-control" type="number" value="3" step="0.1"></label>
-            <label>层3<input id="p5-layer-3" class="p5-control" type="number" value="4" step="0.1"></label>
-            <label>层4<input id="p5-layer-4" class="p5-control" type="number" value="5" step="0.1"></label>
+            <label>层0 介电常数<input id="p5-layer-0" class="p5-control" type="number" value="1" step="0.1"></label>
+            <label>层1 介电常数<input id="p5-layer-1" class="p5-control" type="number" value="2" step="0.1"></label>
+            <label>层2 介电常数<input id="p5-layer-2" class="p5-control" type="number" value="3" step="0.1"></label>
+            <label>层3 介电常数<input id="p5-layer-3" class="p5-control" type="number" value="4" step="0.1"></label>
+            <label>层4 介电常数<input id="p5-layer-4" class="p5-control" type="number" value="5" step="0.1"></label>
           </div>
           <div class="p5-boundary-grid">
-            <label>B1 base<input id="p5-b1-base" class="p5-control" type="number" value="30"></label>
-            <label>B1 thick<input id="p5-b1-thickness" class="p5-control" type="number" value="300"></label>
-            <label>B1 amp<input id="p5-b1-amp" class="p5-control" type="number" value="10"></label>
-            <label>B1 trend<select id="p5-b1-trend" class="p5-control"><option value="linear">linear</option><option value="exp">exp</option><option value="sin">sin</option><option value="none">none</option></select></label>
-            <label>B1 trend amp<input id="p5-b1-trend-amp" class="p5-control" type="number" value="15"></label>
-            <label>B1 period<input id="p5-b1-trend-period" class="p5-control" type="number" value="200"></label>
-            <label>B2 base<input id="p5-b2-base" class="p5-control" type="number" value="330"></label>
-            <label>B2 thick<input id="p5-b2-thickness" class="p5-control" type="number" value="300"></label>
-            <label>B2 amp<input id="p5-b2-amp" class="p5-control" type="number" value="10"></label>
-            <label>B2 trend<select id="p5-b2-trend" class="p5-control"><option value="linear">linear</option><option value="exp">exp</option><option value="sin">sin</option><option value="none">none</option></select></label>
-            <label>B2 trend amp<input id="p5-b2-trend-amp" class="p5-control" type="number" value="15"></label>
-            <label>B2 period<input id="p5-b2-trend-period" class="p5-control" type="number" value="200"></label>
-            <label>B3 base<input id="p5-b3-base" class="p5-control" type="number" value="630"></label>
-            <label>B3 thick<input id="p5-b3-thickness" class="p5-control" type="number" value="300"></label>
-            <label>B3 amp<input id="p5-b3-amp" class="p5-control" type="number" value="10"></label>
-            <label>B3 trend<select id="p5-b3-trend" class="p5-control"><option value="exp">exp</option><option value="linear">linear</option><option value="sin">sin</option><option value="none">none</option></select></label>
-            <label>B3 trend amp<input id="p5-b3-trend-amp" class="p5-control" type="number" value="15"></label>
-            <label>B3 period<input id="p5-b3-trend-period" class="p5-control" type="number" value="200"></label>
-            <label>B4 base<input id="p5-b4-base" class="p5-control" type="number" value="800"></label>
-            <label>B4 thick<input id="p5-b4-thickness" class="p5-control" type="number" value="300"></label>
-            <label>B4 amp<input id="p5-b4-amp" class="p5-control" type="number" value="10"></label>
-            <label>B4 trend<select id="p5-b4-trend" class="p5-control"><option value="sin">sin</option><option value="linear">linear</option><option value="exp">exp</option><option value="none">none</option></select></label>
-            <label>B4 trend amp<input id="p5-b4-trend-amp" class="p5-control" type="number" value="30"></label>
-            <label>B4 period<input id="p5-b4-trend-period" class="p5-control" type="number" value="800"></label>
+            <label>B1 基准位置 (网格行)<input id="p5-b1-base" class="p5-control" type="number" value="30"></label>
+            <label>B1 扰动厚度 (网格)<input id="p5-b1-thickness" class="p5-control" type="number" value="300"></label>
+            <label>B1 随机扰动幅度 (网格)<input id="p5-b1-amp" class="p5-control" type="number" value="10"></label>
+            <label>B1 趋势类型<select id="p5-b1-trend" class="p5-control"><option value="linear">线性</option><option value="exp">指数</option><option value="sin">正弦</option><option value="none">无</option></select></label>
+            <label>B1 趋势幅度 (网格)<input id="p5-b1-trend-amp" class="p5-control" type="number" value="15"></label>
+            <label>B1 趋势周期 (网格)<input id="p5-b1-trend-period" class="p5-control" type="number" value="200"></label>
+            <label>B2 基准位置 (网格行)<input id="p5-b2-base" class="p5-control" type="number" value="330"></label>
+            <label>B2 扰动厚度 (网格)<input id="p5-b2-thickness" class="p5-control" type="number" value="300"></label>
+            <label>B2 随机扰动幅度 (网格)<input id="p5-b2-amp" class="p5-control" type="number" value="10"></label>
+            <label>B2 趋势类型<select id="p5-b2-trend" class="p5-control"><option value="linear">线性</option><option value="exp">指数</option><option value="sin">正弦</option><option value="none">无</option></select></label>
+            <label>B2 趋势幅度 (网格)<input id="p5-b2-trend-amp" class="p5-control" type="number" value="15"></label>
+            <label>B2 趋势周期 (网格)<input id="p5-b2-trend-period" class="p5-control" type="number" value="200"></label>
+            <label>B3 基准位置 (网格行)<input id="p5-b3-base" class="p5-control" type="number" value="630"></label>
+            <label>B3 扰动厚度 (网格)<input id="p5-b3-thickness" class="p5-control" type="number" value="300"></label>
+            <label>B3 随机扰动幅度 (网格)<input id="p5-b3-amp" class="p5-control" type="number" value="10"></label>
+            <label>B3 趋势类型<select id="p5-b3-trend" class="p5-control"><option value="exp">指数</option><option value="linear">线性</option><option value="sin">正弦</option><option value="none">无</option></select></label>
+            <label>B3 趋势幅度 (网格)<input id="p5-b3-trend-amp" class="p5-control" type="number" value="15"></label>
+            <label>B3 趋势周期 (网格)<input id="p5-b3-trend-period" class="p5-control" type="number" value="200"></label>
+            <label>B4 基准位置 (网格行)<input id="p5-b4-base" class="p5-control" type="number" value="800"></label>
+            <label>B4 扰动厚度 (网格)<input id="p5-b4-thickness" class="p5-control" type="number" value="300"></label>
+            <label>B4 随机扰动幅度 (网格)<input id="p5-b4-amp" class="p5-control" type="number" value="10"></label>
+            <label>B4 趋势类型<select id="p5-b4-trend" class="p5-control"><option value="sin">正弦</option><option value="linear">线性</option><option value="exp">指数</option><option value="none">无</option></select></label>
+            <label>B4 趋势幅度 (网格)<input id="p5-b4-trend-amp" class="p5-control" type="number" value="30"></label>
+            <label>B4 趋势周期 (网格)<input id="p5-b4-trend-period" class="p5-control" type="number" value="800"></label>
           </div>
           <label class="toggle-label"><input id="p5-random-rocks" class="p5-control" type="checkbox" checked> 添加随机异常体</label>
           <div class="p5-layer-values">
-            <label>数量 min<input id="p5-rock-min" class="p5-control" type="number" value="20"></label>
-            <label>数量 max<input id="p5-rock-max" class="p5-control" type="number" value="50"></label>
-            <label>半径 min<input id="p5-rock-radius-min" class="p5-control" type="number" value="5"></label>
-            <label>半径 max<input id="p5-rock-radius-max" class="p5-control" type="number" value="20"></label>
+            <label>随机异常体数量最小<input id="p5-rock-min" class="p5-control" type="number" value="20"></label>
+            <label>随机异常体数量最大<input id="p5-rock-max" class="p5-control" type="number" value="50"></label>
+            <label>异常体半径最小 (网格)<input id="p5-rock-radius-min" class="p5-control" type="number" value="5"></label>
+            <label>异常体半径最大 (网格)<input id="p5-rock-radius-max" class="p5-control" type="number" value="20"></label>
           </div>
           <h3>p5_2 / p5_3 参数</h3>
           <label>空气行 l_THK<input id="p5-air-rows" class="p5-control" type="number" value="30" min="0" step="1"></label>
