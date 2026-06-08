@@ -5,38 +5,59 @@ export function simulateTe2d(input, options = {}) {
   const pairs = sourceReceiverPairs(grid, options);
   const iterations = grid.srcpulse.length;
   const samples = Math.ceil(iterations / grid.outstep);
-  const nrec = pairs.rec.length;
   const nsrc = pairs.src.length;
+  const pairedReceivers = options.fullReceiverGather !== true && pairs.rec.length === pairs.src.length;
+  const nrec = pairedReceivers ? 1 : pairs.rec.length;
   const gather = new Float32Array(samples * nrec * nsrc);
   const tout = new Float64Array(samples);
   const damping = buildPmlDamping(grid.nx, grid.nz, grid.npml, options.pmlStrength || 3.2);
   const srcx = new Float32Array(nsrc), srcz = new Float32Array(nsrc);
-  const recx = new Float32Array(nrec), recz = new Float32Array(nrec);
+  const recx = new Float32Array(pairedReceivers ? nsrc : nrec), recz = new Float32Array(pairedReceivers ? nsrc : nrec);
   const work = estimateWork(grid, pairs, iterations);
+  const srcIndex = new Int32Array(nsrc);
+  const recIndex = new Int32Array(pairedReceivers ? nsrc : nrec);
   for (let shot = 0; shot < nsrc; shot++) {
-    const Ex = new Float64Array(grid.nx * grid.nz);
-    const Ez = new Float64Array(grid.nx * grid.nz);
-    const Hy = new Float64Array(grid.nx * grid.nz);
     const si = nearestIndex(grid.x, pairs.src[shot][0]);
     const sj = nearestIndex(grid.z, pairs.src[shot][1]);
+    srcIndex[shot] = si * grid.nz + sj;
     srcx[shot] = grid.x[si];
     srcz[shot] = grid.z[sj];
-    const recIndex = pairs.rec.map((r, i) => {
-      const ri = nearestIndex(grid.x, r[0]);
-      const rj = nearestIndex(grid.z, r[1]);
-      recx[i] = grid.x[ri];
-      recz[i] = grid.z[rj];
-      return ri * grid.nz + rj;
-    });
+    if (pairedReceivers) {
+      const ri = nearestIndex(grid.x, pairs.rec[shot][0]);
+      const rj = nearestIndex(grid.z, pairs.rec[shot][1]);
+      recIndex[shot] = ri * grid.nz + rj;
+      recx[shot] = grid.x[ri];
+      recz[shot] = grid.z[rj];
+    }
+  }
+  if (!pairedReceivers) {
+    for (let r = 0; r < nrec; r++) {
+      const ri = nearestIndex(grid.x, pairs.rec[r][0]);
+      const rj = nearestIndex(grid.z, pairs.rec[r][1]);
+      recIndex[r] = ri * grid.nz + rj;
+      recx[r] = grid.x[ri];
+      recz[r] = grid.z[rj];
+    }
+  }
+  const Ex = new Float64Array(grid.nx * grid.nz);
+  const Ez = new Float64Array(grid.nx * grid.nz);
+  const Hy = new Float64Array(grid.nx * grid.nz);
+  for (let shot = 0; shot < nsrc; shot++) {
+    Ex.fill(0); Ez.fill(0); Hy.fill(0);
     let out = 0;
     for (let it = 0; it < iterations; it++) {
       updateTeMagnetic(Ex, Ez, Hy, grid, damping);
       updateTeElectric(Ex, Ez, Hy, grid, damping);
-      const sidx = si * grid.nz + sj;
+      const sidx = srcIndex[shot];
       Ez[sidx] += grid.srcpulse[it];
       if (it % grid.outstep === 0) {
         tout[out] = grid.t[it] ?? it * grid.dt;
-        for (let r = 0; r < nrec; r++) gather[(shot * nrec + r) * samples + out] = Ez[recIndex[r]];
+        for (let r = 0; r < nrec; r++) {
+          const ri = pairedReceivers ? shot : r;
+          const value = Ez[recIndex[ri]];
+          if (!Number.isFinite(value)) throw new Error("TE FDTD diverged (NaN/Inf field value).");
+          gather[(shot * nrec + r) * samples + out] = value;
+        }
         out++;
       }
       if (options.onProgress && (it % Math.max(1, Math.floor(iterations / 20)) === 0 || it === iterations - 1)) {

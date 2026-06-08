@@ -6,3 +6,5 @@ headless-process.mjs
 本地部署.png
 *.log
 *.zip
+__pycache__/
+*.pyc

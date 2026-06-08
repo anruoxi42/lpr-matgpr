@@ -6,6 +6,7 @@
     "dev": "node server.mjs",
     "build": "node scripts/build-static.mjs",
     "preview": "node server.mjs",
+    "benchmark:fdtd": "node scripts/fdtd-benchmark.mjs",
     "verify": "node scripts/verify-matgpr-algorithms.mjs"
   },
   "dependencies": {

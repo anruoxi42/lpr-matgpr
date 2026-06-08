@@ -4,7 +4,7 @@ import { IpdStore } from "./processing/ipdStore.js";
 import { depthAxisFromVofh, parseVofh, spectrum, fkSpectrum } from "./processing/algorithms.js";
 import { pickPeaksNearPoint, traceFromSeed, snapPointToPeak } from "./processing/peakTracking.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
-import { DEFAULT_MODEL_MATERIALS, manualHorizonsToModel, normalizeObject } from "./modeling/model2d.js";
+import { DEFAULT_MODEL_MATERIALS, manualHorizonsToModel, normalizeObject, prepareFdtdGridFromModel } from "./modeling/model2d.js";
 import { MATERIAL_PRESETS } from "./modeling/materials.js";
 import { variablesFromCurrentDataset, variablesFromForwardResult, variablesFromModelGrid, variablesFromP5Dielectric, writeMatFile } from "./io/mat.js";
 import { parseMatFileAsync } from "./io/mat-reader.js";
@@ -12,7 +12,7 @@ import { readTheme } from "./theme.js";
 
 let canvasTheme = readTheme();
 const store = new IpdStore();
-const worker = new Worker(new URL("./workers/processingWorker.js", import.meta.url), { type: "module" });
+let worker = createProcessingWorker();
 const pending = new Map();
 let displaySource = "current";
 let threeVolume = null;
@@ -33,6 +33,8 @@ let fdtdP5Preset = false;
 let randomP5State = { activeStep: "p5_1", dielectric: null, model2d: null, fdtd: null, params: null };
 const MODEL_MATERIAL_IDS = new Set(MATERIAL_PRESETS.map(m => m.id));
 const MODEL_TYPE_LABELS = { circle: "圆形", rectangle: "矩形", pipe: "管道", polygon: "多边形", ellipse: "椭圆" };
+let activeFdtdCancel = null;
+let fdtdCapabilitiesCache = null;
 let radarSelections = [];
 let radarAnnotations = [];
 let lastMergedSelection = null;
@@ -155,26 +157,86 @@ function ensureMatName(name) {
   const clean = String(name || "lpr_export.mat").trim() || "lpr_export.mat";
   return /\.mat$/i.test(clean) ? clean : `${clean}.mat`;
 }
-function runWorker(op, dataset, params = {}) {
+function createProcessingWorker() {
+  const w = new Worker(new URL("./workers/processingWorker.js", import.meta.url), { type: "module" });
+  w.onmessage = handleWorkerMessage;
+  w.onerror = error => {
+    const err = new Error(error.message || "Processing worker failed.");
+    resetProcessingWorker(err);
+  };
+  return w;
+}
+
+function resetProcessingWorker(reason = new Error("Processing worker restarted."), recreate = true) {
+  setActiveFdtdCancel(null);
+  for (const [id, p] of pending.entries()) {
+    if (p.timeoutId) clearTimeout(p.timeoutId);
+    p.reject(reason instanceof Error ? reason : new Error(String(reason)));
+    pending.delete(id);
+  }
+  try { worker?.terminate(); } catch {}
+  if (recreate) worker = createProcessingWorker();
+}
+
+function runWorker(op, dataset, params = {}, options = {}) {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject, op });
+    const entry = { resolve, reject, op, startedAt: performance.now(), timeoutId: null };
+    if (options.timeoutMs) {
+      entry.timeoutId = setTimeout(() => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        const err = new Error(`${op} timed out and was canceled.`);
+        reject(err);
+        resetProcessingWorker(err);
+      }, Math.max(1000, Number(options.timeoutMs)));
+    }
+    pending.set(id, entry);
+    if (options.cancelable) {
+      setActiveFdtdCancel(() => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        if (entry.timeoutId) clearTimeout(entry.timeoutId);
+        reject(new Error("FDTD canceled."));
+        resetProcessingWorker(new Error("FDTD canceled."));
+      });
+    }
     const needsDatasetData = op !== "fdtd-tm2d" && op !== "fdtd-te2d";
     const copy = needsDatasetData ? new Float32Array(dataset.data) : new Float32Array(0);
     worker.postMessage({ id, op, params: normalizeWorkerParams(dataset, params), dataset: { ...dataset, data: copy.buffer } }, [copy.buffer]);
   });
 }
-worker.onmessage = ({ data }) => {
+
+function handleWorkerMessage({ data }) {
   const p = pending.get(data.id);
   if (!p) return;
   if (data.progress) {
     const pct = Math.max(0, Math.min(100, Math.round((data.detail?.progress || 0) * 100)));
-    $("#footer-status").textContent = `${p.op.toUpperCase()} ${pct}%`;
+    updateFdtdStatus(`${p.op.toUpperCase()} ${pct}%`, data.detail);
     return;
   }
   pending.delete(data.id);
+  if (p.timeoutId) clearTimeout(p.timeoutId);
+  if (activeFdtdCancel && /^fdtd-/.test(p.op)) setActiveFdtdCancel(null);
   data.ok ? p.resolve(data.result) : p.reject(new Error(data.error));
-};
+}
+
+function setActiveFdtdCancel(fn) {
+  activeFdtdCancel = fn;
+  const btn = $("#fdtd-cancel");
+  if (btn) btn.hidden = !fn;
+}
+
+function cancelActiveFdtd() {
+  if (activeFdtdCancel) activeFdtdCancel();
+}
+
+function updateFdtdStatus(text, detail = null) {
+  const status = $("#footer-status");
+  if (!status) return;
+  const suffix = detail?.shot && detail?.shots ? ` · ${detail.shot}/${detail.shots}` : "";
+  status.textContent = `${text}${suffix}`;
+}
 
 function refresh() {
   const ds = currentDisplayed();
@@ -3291,6 +3353,7 @@ function bindUi() {
   $("#model-p5-preset") && ($("#model-p5-preset").onclick = applyP5Preset);
   $("#model-fdtd-tm") && ($("#model-fdtd-tm").onclick = () => forwardModel("tm"));
   $("#model-fdtd-te") && ($("#model-fdtd-te").onclick = () => forwardModel("te"));
+  $("#fdtd-cancel")?.addEventListener("click", cancelActiveFdtd);
   $("#model-export-mat") && ($("#model-export-mat").onclick = exportModelMat);
   $("#model-export-png") && ($("#model-export-png").onclick = exportModelPng);
   ["model-epsr","model-sigma","model-mu","model-traces","model-depth-samples","model-depth-max","model-dx"].forEach(id => $(`#${id}`)?.addEventListener("change", () => { markModel2dDirty(); renderModel(); }));
@@ -3502,6 +3565,229 @@ function collectRandomFdtdParams(modelPayload) {
   return fdtd;
 }
 
+function selectedFdtdBackend(controlId) {
+  const value = $(`#${controlId}`)?.value || "auto";
+  return ["auto", "python", "js"].includes(value) ? value : "auto";
+}
+
+function setFdtdDiagnostics(targetId, text) {
+  const el = $(`#${targetId}`);
+  if (el) el.textContent = text;
+}
+
+function cleanFdtdParams(fdtd = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(fdtd || {})) {
+    if (value instanceof Float32Array || value instanceof Float64Array || value instanceof ArrayBuffer) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function fdtdIterations(fdtd = {}) {
+  return Math.max(2, Math.floor(Number(fdtd.iterations || (fdtd.srcpulse?.length) || fdtd.samples || 640)));
+}
+
+function fdtdEstimatedUpdates(modelPayload = {}, fdtd = {}) {
+  const traces = Math.max(1, Math.floor(Number(fdtd.traceCount || fdtd.numTraces || Math.min(80, modelPayload.nx || 80))));
+  return Math.max(1, Number(modelPayload.nx || 1) * Number(modelPayload.nz || 1) * traces * fdtdIterations(fdtd));
+}
+
+function fdtdTimeoutMs(modelPayload, fdtd) {
+  const updates = fdtdEstimatedUpdates(modelPayload, fdtd);
+  const minutes = Math.max(5, Math.min(30, updates / 80_000_000));
+  return minutes * 60_000;
+}
+
+function previewFdtdParams(fdtd = {}) {
+  const outstep = Math.max(1, Math.floor(Number(fdtd.outstep || 1)));
+  const samples = Math.max(16, Math.min(96, Math.floor(Number(fdtd.samples || 96))));
+  const iterations = Math.max(16, Math.min(fdtdIterations(fdtd), samples * outstep));
+  const preview = {
+    ...fdtd,
+    traceCount: Math.max(1, Math.min(24, Math.floor(Number(fdtd.traceCount || fdtd.numTraces || 24)))),
+    samples: Math.ceil(iterations / outstep),
+    iterations
+  };
+  if (fdtd.srcpulse?.length) preview.srcpulse = Float32Array.from(fdtd.srcpulse.slice(0, iterations));
+  return preview;
+}
+
+async function fdtdCapabilities(force = false) {
+  if (fdtdCapabilitiesCache && !force) return fdtdCapabilitiesCache;
+  try {
+    const response = await fetch("/api/fdtd/capabilities", { method: "GET" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    fdtdCapabilitiesCache = await response.json();
+  } catch (error) {
+    fdtdCapabilitiesCache = { available: false, error: error.message || String(error) };
+  }
+  return fdtdCapabilitiesCache;
+}
+
+function addBundleArray(arrays, name, value, dtype = "f32") {
+  if (!value?.length) return;
+  const typed = dtype === "f64" ? Float64Array.from(value) : Float32Array.from(value);
+  arrays.push({ name, dtype, data: typed });
+}
+
+function fdtdRequestBundle(mode, modelPayload, fdtd) {
+  const grid = prepareFdtdGridFromModel(modelPayload, fdtd);
+  const arrays = [];
+  addBundleArray(arrays, "ep", grid.ep, "f32");
+  addBundleArray(arrays, "sig", grid.sig, "f32");
+  addBundleArray(arrays, "mu", grid.mu, "f32");
+  addBundleArray(arrays, "x", grid.x, "f32");
+  addBundleArray(arrays, "z", grid.z, "f32");
+  if (fdtd.srcpulse?.length) addBundleArray(arrays, "srcpulse", fdtd.srcpulse, "f32");
+  const header = {
+    version: 1,
+    mode,
+    fdtd: cleanFdtdParams(fdtd),
+    grid: {
+      nx: grid.nx,
+      nz: grid.nz,
+      npml: grid.npml,
+      defaultAntennaZ: grid.defaultAntennaZ,
+      defaultStartX: grid.defaultStartX,
+      defaultEndX: grid.defaultEndX,
+      fdtdStepM: grid.fdtdStepM,
+      propertyStepM: grid.propertyStepM,
+      airThicknessM: grid.airThicknessM
+    },
+    arrays: arrays.map(a => ({ name: a.name, dtype: a.dtype, length: a.data.length, byteLength: a.data.byteLength }))
+  };
+  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+  const totalBytes = 4 + headerBytes.byteLength + arrays.reduce((sum, a) => sum + a.data.byteLength, 0);
+  const buffer = new ArrayBuffer(totalBytes);
+  const view = new DataView(buffer);
+  view.setUint32(0, headerBytes.byteLength, true);
+  let offset = 4;
+  new Uint8Array(buffer, offset, headerBytes.byteLength).set(headerBytes);
+  offset += headerBytes.byteLength;
+  for (const array of arrays) {
+    new Uint8Array(buffer, offset, array.data.byteLength).set(new Uint8Array(array.data.buffer, array.data.byteOffset, array.data.byteLength));
+    offset += array.data.byteLength;
+  }
+  return { blob: new Blob([buffer], { type: "application/octet-stream" }), grid };
+}
+
+function hydrateFdtdResult(payload = {}) {
+  return {
+    ...payload,
+    data: Float32Array.from(payload.data || []),
+    tout: Float64Array.from(payload.tout || []),
+    srcx: Float32Array.from(payload.srcx || payload.x || []),
+    srcz: Float32Array.from(payload.srcz || []),
+    recx: Float32Array.from(payload.recx || []),
+    recz: Float32Array.from(payload.recz || []),
+    x: Float32Array.from(payload.x || payload.srcx || []),
+    z: Float32Array.from(payload.z || []),
+    meta: {
+      ...(payload.meta || {}),
+      timeAxisNs: Float32Array.from(payload.meta?.timeAxisNs || [])
+    }
+  };
+}
+
+async function runPythonFdtd(mode, modelPayload, fdtd, options = {}) {
+  const caps = await fdtdCapabilities();
+  if (!caps.available) throw new Error(caps.error || "Python/Numba FDTD backend is unavailable.");
+  const { blob } = fdtdRequestBundle(mode, modelPayload, fdtd);
+  const createController = new AbortController();
+  let jobId = "";
+  let canceled = false;
+  let cancelReject = null;
+  const cancelPromise = new Promise((_, reject) => { cancelReject = reject; });
+  setActiveFdtdCancel(() => {
+    canceled = true;
+    createController.abort();
+    if (jobId) fetch(`/api/fdtd/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" }).catch(() => {});
+    cancelReject?.(new Error("FDTD canceled."));
+  });
+  const runPromise = (async () => {
+    const created = await fetch(`/api/fdtd/jobs?mode=${encodeURIComponent(mode)}&workflow=${encodeURIComponent(options.workflow || "manual")}`, {
+      method: "POST",
+      body: blob,
+      signal: createController.signal
+    });
+    if (!created.ok) throw new Error((await created.text()) || `Python FDTD job failed to start (${created.status}).`);
+    const job = await created.json();
+    jobId = job.jobId;
+    updateFdtdStatus(`正在使用 Python/Numba 后端`);
+    for (;;) {
+      if (canceled) throw new Error("FDTD canceled.");
+      const statusResponse = await fetch(`/api/fdtd/jobs/${encodeURIComponent(jobId)}`);
+      if (!statusResponse.ok) throw new Error(`Python FDTD status failed (${statusResponse.status}).`);
+      const status = await statusResponse.json();
+      const pct = Math.round(Math.max(0, Math.min(1, Number(status.progress || 0))) * 100);
+      updateFdtdStatus(`Python/Numba FDTD ${pct}%`, status.detail || status);
+      if (status.status === "done") break;
+      if (status.status === "failed") throw new Error(status.error || "Python FDTD failed.");
+      await new Promise(resolve => setTimeout(resolve, 700));
+    }
+    const resultResponse = await fetch(`/api/fdtd/jobs/${encodeURIComponent(jobId)}/result`);
+    if (!resultResponse.ok) throw new Error(`Python FDTD result failed (${resultResponse.status}).`);
+    return hydrateFdtdResult(await resultResponse.json());
+  })();
+  try {
+    return await Promise.race([runPromise, cancelPromise]);
+  } finally {
+    setActiveFdtdCancel(null);
+  }
+}
+
+async function runFdtdComputation({ mode, modelPayload, fdtd, dataset, workflow = "manual", backendControlId = "fdtd-backend", diagnosticsId = "fdtd-diagnostics" }) {
+  const preference = selectedFdtdBackend(backendControlId);
+  const previewControlId = backendControlId === "p5-fdtd-backend" ? "p5-fdtd-preview" : "fdtd-preview";
+  const op = mode === "te" ? "fdtd-te2d" : "fdtd-tm2d";
+  const updates = fdtdEstimatedUpdates(modelPayload, fdtd);
+  if ($(`#${previewControlId}`)?.checked) {
+    const previewFdtd = previewFdtdParams(fdtd);
+    updateFdtdStatus(`${mode.toUpperCase()} FDTD 快速预览...`);
+    const preview = await runWorker(op, dataset || randomWorkerDataset(), { model2d: modelPayload, fdtd: previewFdtd }, {
+      cancelable: true,
+      timeoutMs: 5 * 60_000
+    });
+    preview.backend = "js-worker-preview";
+    setFdtdDiagnostics(diagnosticsId, `快速预览完成：${preview.numTraces} 道 x ${preview.numSamples} 样点，继续完整计算。`);
+    if (workflow === "manual-snapshot") {
+      store.setOutput({ ...preview, name: `${mode}_fdtd_preview` }, { name: `${mode.toUpperCase()} FDTD Preview`, op: `fdtd-${mode}2d-preview`, params: previewFdtd });
+      displaySource = "output"; $("#display-mode").value = "output"; refresh();
+    } else if (workflow === "random-p5") {
+      randomP5State = { ...randomP5State, fdtd: preview };
+      renderRandomP5Workbench();
+    }
+  }
+  if (preference !== "js") {
+    try {
+      setFdtdDiagnostics(diagnosticsId, "正在使用 Python/Numba 后端。");
+      const result = await runPythonFdtd(mode, modelPayload, fdtd, { workflow });
+      result.backend = "python-numba-cpu";
+      setFdtdDiagnostics(diagnosticsId, "Python/Numba 后端完成。");
+      return result;
+    } catch (error) {
+      if (preference === "python") {
+        toast(`Python 后端不可用，已切换浏览器 JS 后端：${error.message || error}`, "warn");
+      } else {
+        toast("Python 后端不可用，已切换浏览器 JS 后端", "warn");
+      }
+      setFdtdDiagnostics(diagnosticsId, `Python 后端不可用，使用浏览器 JS。${error.message || ""}`.trim());
+    }
+  }
+  if (updates > 250_000_000 || fdtd.p5Mode) {
+    toast("浏览器 JS FDTD 预计耗时较长，可安装 Python/Numba 后端提速。", "warn");
+  }
+  updateFdtdStatus("正在使用浏览器 JS 后端");
+  const result = await runWorker(op, dataset || randomWorkerDataset(), { model2d: modelPayload, fdtd }, {
+    cancelable: true,
+    timeoutMs: fdtdTimeoutMs(modelPayload, fdtd)
+  });
+  result.backend = "js-worker";
+  setFdtdDiagnostics(diagnosticsId, "浏览器 JS 后端完成。");
+  return result;
+}
+
 function setRandomP5Step(step) {
   randomP5State.activeStep = step || "p5_1";
   $$("[data-random-step]").forEach(btn => btn.classList.toggle("active", btn.dataset.randomStep === randomP5State.activeStep));
@@ -3547,7 +3833,7 @@ async function runRandomP5Step(step = randomP5State.activeStep) {
       const fdtd = collectRandomFdtdParams(modelPayload);
       if (!fdtd.srcpulse) toast("P2_pulse_new.mat 未加载，p5 正演将使用内置 Ricker 脉冲。", "warn");
       const mode = $("#p5-fdtd-mode")?.value || "tm";
-      const result = await runWorker(mode === "te" ? "fdtd-te2d" : "fdtd-tm2d", randomWorkerDataset(), { model2d: modelPayload, fdtd });
+      const result = await runFdtdComputation({ mode, modelPayload, fdtd, dataset: randomWorkerDataset(), workflow: "random-p5", backendControlId: "p5-fdtd-backend", diagnosticsId: "p5-fdtd-diagnostics" });
       randomP5State = { ...randomP5State, activeStep: step, fdtd: result };
       downloadMatWithPrompt(variablesFromForwardResult(result, modelPayload, { workflow: "random-p5", mode, ...fdtd }), "p5_3_radar_gram.mat");
       toast(`p5_3 ${mode.toUpperCase()} FDTD 仿真已完成`);
@@ -4239,7 +4525,7 @@ forwardModel = async function forwardModelV2(mode = "tm") {
   }
   $("#footer-status").textContent = `${mode.toUpperCase()} FDTD running...`;
   try {
-    fdtdForwardResult = await runWorker(mode === "te" ? "fdtd-te2d" : "fdtd-tm2d", ds, { model2d: modelPayload, fdtd });
+    fdtdForwardResult = await runFdtdComputation({ mode, modelPayload, fdtd, dataset: ds, workflow: "manual-snapshot", backendControlId: "fdtd-backend", diagnosticsId: "fdtd-diagnostics" });
     store.setOutput({ ...fdtdForwardResult, name: `${mode}_fdtd_forward` }, { name: `${mode.toUpperCase()} FDTD Forward`, op: `fdtd-${mode}2d`, params: fdtd });
     displaySource = "output"; $("#display-mode").value = "output"; refresh();
     $("#footer-status").textContent = `${mode.toUpperCase()} FDTD completed`;

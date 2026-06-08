@@ -301,6 +301,7 @@ label:has(select), label:has(input) { text-transform: none; font-size: 12px; col
   padding: 0 14px; background: var(--bg1); border-top: 1px solid var(--bd-divider);
   color: var(--t3); font-size: 10px; font-family: var(--mono); letter-spacing: 0.02em;
 }
+.footer-cancel { padding:3px 8px; min-height:22px; border-color:#6d2f2f; color:#ffd8d8; background:#251010; }
 
 /* ═══════════ FLOAT WINDOWS ═══════════ */
 .float-window {
@@ -437,6 +438,9 @@ label:has(select), label:has(input) { text-transform: none; font-size: 12px; col
 }
 .p5-boundary-grid label, .p5-layer-values label { margin:0; min-width:0; font-size:10px; line-height:1.35; }
 .p5-boundary-grid input, .p5-boundary-grid select, .p5-layer-values input { padding:5px 6px; font-size:11px; }
+.fdtd-advanced { margin:8px 0; border:1px solid var(--bd); border-radius:var(--r); padding:6px 8px; background:rgba(255,255,255,.02); }
+.fdtd-advanced summary { cursor:pointer; color:var(--t2); font-size:11px; margin:-2px 0 4px; }
+.fdtd-advanced[open] { display:grid; gap:6px; }
 
 /* ═══════════ MANUAL GEO ═══════════ */
 .manual-geo-shell { height:100%; display:grid; grid-template-rows:auto auto minmax(0, 1fr); gap:8px; padding:10px; background:var(--bg0); }

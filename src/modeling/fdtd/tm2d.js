@@ -11,39 +11,56 @@ export function simulateTm2d(input, options = {}) {
   const outstep = Math.max(1, Math.round(Number(options.outstep || grid.outstep || 1)));
   const samples = Math.ceil(iterations / outstep);
   const nsrc = pairs.src.length;
-  const nrec = pairs.rec.length;
+  const pairedReceivers = options.fullReceiverGather !== true && pairs.rec.length === pairs.src.length;
+  const nrec = pairedReceivers ? 1 : pairs.rec.length;
   const gather = new Float32Array(samples * nrec * nsrc);
   const tout = new Float64Array(samples);
   const srcxArr = new Float32Array(nsrc), srczArr = new Float32Array(nsrc);
-  const recxArr = new Float32Array(nrec), reczArr = new Float32Array(nrec);
+  const recxArr = new Float32Array(pairedReceivers ? nsrc : nrec), reczArr = new Float32Array(pairedReceivers ? nsrc : nrec);
 
   /* 2. CPML coefficients (MATLAB lines 129-206) */
   const coef = computeCpmlCoefficients(grid);
   const work = estimateWork(grid, pairs, iterations);
+  const srcI = new Int32Array(nsrc), srcJ = new Int32Array(nsrc);
+  const recI = new Int32Array(pairedReceivers ? nsrc : nrec), recJ = new Int32Array(pairedReceivers ? nsrc : nrec);
+  for (let s = 0; s < nsrc; s++) {
+    const [si, sj] = indexInField(grid.x, grid.z, pairs.src[s][0], pairs.src[s][1]);
+    srcI[s] = si; srcJ[s] = sj;
+    srcxArr[s] = fieldCoord(grid.x, si); srczArr[s] = fieldCoord(grid.z, sj);
+    if (pairedReceivers) {
+      const [ri, rj] = indexInField(grid.x, grid.z, pairs.rec[s][0], pairs.rec[s][1]);
+      recI[s] = ri; recJ[s] = rj;
+      recxArr[s] = fieldCoord(grid.x, ri); reczArr[s] = fieldCoord(grid.z, rj);
+    }
+  }
+  if (!pairedReceivers) {
+    for (let r = 0; r < nrec; r++) {
+      const [ri, rj] = indexInField(grid.x, grid.z, pairs.rec[r][0], pairs.rec[r][1]);
+      recI[r] = ri; recJ[r] = rj;
+      recxArr[r] = fieldCoord(grid.x, ri); reczArr[r] = fieldCoord(grid.z, rj);
+    }
+  }
+
+  const Ey = new Float64Array(grid.nxField * grid.nzField);
+  const Hx = new Float64Array(grid.nxField * (grid.nzField + 1));
+  const Hz = new Float64Array((grid.nxField + 1) * grid.nzField);
+  const Eydiffx = new Float64Array(grid.nxField * grid.nzField);
+  const Eydiffz = new Float64Array(grid.nxField * grid.nzField);
+  const Hxdiffz = new Float64Array(grid.nxField * grid.nzField);
+  const Hzdiffx = new Float64Array(grid.nxField * grid.nzField);
+  const PEyx = new Float64Array(grid.nxField * grid.nzField);
+  const PEyz = new Float64Array(grid.nxField * grid.nzField);
+  const PHx = new Float64Array(grid.nxField * grid.nzField);
+  const PHz = new Float64Array(grid.nxField * grid.nzField);
 
   /* 3. loop over shots */
   for (let s = 0; s < nsrc; s++) {
-    const [si, sj] = indexInField(grid.x, grid.z, pairs.src[s][0], pairs.src[s][1]);
-    srcxArr[s] = fieldCoord(grid.x, si); srczArr[s] = fieldCoord(grid.z, sj);
-
-    const recIdx = pairs.rec.map((r, ri) => {
-      const [ri_, rj_] = indexInField(grid.x, grid.z, r[0], r[1]);
-      recxArr[ri] = fieldCoord(grid.x, ri_); reczArr[ri] = fieldCoord(grid.z, rj_);
-      return { i: ri_, j: rj_ };
-    });
+    const si = srcI[s], sj = srcJ[s];
 
     /* zero fields (MATLAB lines 222-232) */
-    const Ey = new Float64Array(grid.nxField * grid.nzField);
-    const Hx = new Float64Array(grid.nxField * (grid.nzField + 1));
-    const Hz = new Float64Array((grid.nxField + 1) * grid.nzField);
-    const Eydiffx = new Float64Array(grid.nxField * grid.nzField);
-    const Eydiffz = new Float64Array(grid.nxField * grid.nzField);
-    const Hxdiffz = new Float64Array(grid.nxField * grid.nzField);
-    const Hzdiffx = new Float64Array(grid.nxField * grid.nzField);
-    const PEyx = new Float64Array(grid.nxField * grid.nzField);
-    const PEyz = new Float64Array(grid.nxField * grid.nzField);
-    const PHx = new Float64Array(grid.nxField * grid.nzField);
-    const PHz = new Float64Array(grid.nxField * grid.nzField);
+    Ey.fill(0); Hx.fill(0); Hz.fill(0);
+    Eydiffx.fill(0); Eydiffz.fill(0); Hxdiffz.fill(0); Hzdiffx.fill(0);
+    PEyx.fill(0); PEyz.fill(0); PHx.fill(0); PHz.fill(0);
 
     let outIdx = 0;
     for (let it = 0; it < iterations; it++) {
@@ -109,7 +126,10 @@ export function simulateTm2d(input, options = {}) {
       if (it % outstep === 0) {
         tout[outIdx] = grid.t[it] ?? it * grid.dt;
         for (let r = 0; r < nrec; r++) {
-          gather[(s * nrec + r) * samples + outIdx] = Ey[recIdx[r].i * grid.nzField + recIdx[r].j];
+          const recIndex = pairedReceivers ? s : r;
+          const value = Ey[recI[recIndex] * grid.nzField + recJ[recIndex]];
+          if (!Number.isFinite(value)) throw new Error("TM FDTD diverged (NaN/Inf field value).");
+          gather[(s * nrec + r) * samples + outIdx] = value;
         }
         outIdx++;
       }
