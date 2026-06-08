@@ -413,6 +413,31 @@ label:has(select), label:has(input) { text-transform: none; font-size: 12px; col
 .geo-canvas-wrap { height:280px; border:1px solid var(--bd); border-radius:var(--r); overflow:hidden; background:var(--bg0); }
 .geo-canvas-wrap canvas { width:100%; height:100%; display:block; }
 
+/* ═══════════ 2-D / RANDOM MODELING ═══════════ */
+.layer-material-list { display:grid; gap:6px; margin:6px 0 10px; }
+.layer-material-row {
+  display:grid;
+  grid-template-columns:minmax(56px, .7fr) minmax(90px, 1fr) repeat(3, minmax(68px, .8fr));
+  gap:6px;
+  align-items:end;
+  padding:7px;
+  border:1px solid var(--bd);
+  border-radius:var(--r);
+  background:var(--bg2);
+}
+.layer-material-row b { color:var(--t0); font-size:11px; font-weight:600; }
+.layer-material-row span { color:var(--t3); font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.layer-material-row label { margin:0; min-width:0; font-size:9px; }
+.layer-material-row input { padding:4px 5px; font-size:11px; }
+.p5-boundary-grid, .p5-layer-values {
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(86px, 1fr));
+  gap:6px;
+  margin:8px 0;
+}
+.p5-boundary-grid label, .p5-layer-values label { margin:0; min-width:0; font-size:10px; }
+.p5-boundary-grid input, .p5-boundary-grid select, .p5-layer-values input { padding:5px 6px; font-size:11px; }
+
 /* ═══════════ MANUAL GEO ═══════════ */
 .manual-geo-shell { height:100%; display:grid; grid-template-rows:auto auto minmax(0, 1fr); gap:8px; padding:10px; background:var(--bg0); }
 .manual-geo-toolbar { display:flex; gap:6px; overflow-x:auto; align-items:center; padding:6px; border:1px solid var(--bd); border-radius:var(--r); background:var(--bg2); }

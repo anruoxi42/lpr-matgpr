@@ -4,11 +4,18 @@ import { MATERIAL_PRESETS, calDensity, calLossTangent, normalizeMaterial } from 
 const MATLAB_EPS0 = 8.854e-12;
 
 export const DEFAULT_MODEL_MATERIALS = [
-  { id: "layer0", name: "Layer 1", epsr: 9, sigma: 0.0005, mu: 1 },
-  { id: "layer1", name: "Layer 2", epsr: 5.5, sigma: 0.0003, mu: 1 },
+  { id: "layer0", name: "Layer 1", epsr: 3.2, sigma: 0.00015, mu: 1 },
+  { id: "layer1", name: "Layer 2", epsr: 3.8, sigma: 0.0002, mu: 1 },
   { id: "layer2", name: "Layer 3", epsr: 4.5, sigma: 0.00025, mu: 1 },
-  { id: "layer3", name: "Layer 4", epsr: 3.8, sigma: 0.0002, mu: 1 },
-  { id: "layer4", name: "Layer 5", epsr: 3.2, sigma: 0.00015, mu: 1 }
+  { id: "layer3", name: "Layer 4", epsr: 5.5, sigma: 0.0003, mu: 1 },
+  { id: "layer4", name: "Layer 5", epsr: 9, sigma: 0.0005, mu: 1 }
+];
+
+const P5_BOUNDARY_DEFAULTS = [
+  { base: 30, thickness: 300, amp: 10, trendType: "linear", trendAmp: 15, trendPeriod: 200 },
+  { base: 330, thickness: 300, amp: 10, trendType: "linear", trendAmp: 15, trendPeriod: 200 },
+  { base: 630, thickness: 300, amp: 10, trendType: "exp", trendAmp: 15, trendPeriod: 200 },
+  { base: 800, thickness: 300, amp: 10, trendType: "sin", trendAmp: 30, trendPeriod: 800 }
 ];
 
 export function createEmptyModel(options = {}) {
@@ -143,27 +150,34 @@ export function applyP5ConductivityToModel(model, options = {}) {
 export function generateLayeredDielectric(options = {}) {
   const size = Math.max(32, Math.floor(Number(options.size || 1000)));
   const dielectric = new Float32Array(size * size);
-  dielectric.fill(1);
-  const b1 = generateBoundary(30, 300, 10, size, "linear", 15, 200, options.seed);
-  const b2 = generateBoundary(330, 300, 10, size, "linear", 15, 200, addSeed(options.seed, 1));
-  const b3 = generateBoundary(630, 300, 10, size, "exp", 15, 200, addSeed(options.seed, 2));
-  const b4 = generateBoundary(800, 300, 10, size, "sin", 30, 800, addSeed(options.seed, 3));
+  const layerValues = normalizeLayerValues(options.layerValues || options.epsrLayers, [1, 2, 3, 4, 5]);
+  dielectric.fill(layerValues[0]);
+  const boundaryOptions = normalizeBoundaryOptions(options);
+  const [b1, b2, b3, b4] = boundaryOptions.map((cfg, i) =>
+    generateBoundary(cfg.base, cfg.thickness, cfg.amp, size, cfg.trendType, cfg.trendAmp, cfg.trendPeriod, addSeed(options.seed, i))
+  );
   for (let x = 0; x < size; x++) {
     const y1 = clamp(Math.round(b1[x]), 0, size - 1);
     const y2 = clamp(Math.round(b2[x]), y1, size - 1);
     const y3 = clamp(Math.round(b3[x]), y2, size - 1);
     const y4 = clamp(Math.round(b4[x]), y3, size - 1);
-    fillColumn(dielectric, size, x, y1, y2, 2);
-    fillColumn(dielectric, size, x, y2 + 1, y3, 3);
-    fillColumn(dielectric, size, x, y3 + 1, y4, 4);
-    fillColumn(dielectric, size, x, y4 + 1, size - 1, 5);
+    fillColumn(dielectric, size, x, y1, y2, layerValues[1]);
+    fillColumn(dielectric, size, x, y2 + 1, y3, layerValues[2]);
+    fillColumn(dielectric, size, x, y3 + 1, y4, layerValues[3]);
+    fillColumn(dielectric, size, x, y4 + 1, size - 1, layerValues[4]);
   }
   const objects = [];
   if (options.randomRocks !== false) {
     const rng = mulberry32(Number(options.seed) || 12345);
-    addRandomRocks(dielectric, size, b2, b3, b4, rng, objects);
+    addRandomRocks(dielectric, size, b2, b3, b4, rng, objects, {
+      minCount: options.rockMinCount ?? options.randomRockMin,
+      maxCount: options.rockMaxCount ?? options.randomRockMax,
+      radiusMin: options.rockRadiusMin,
+      radiusMax: options.rockRadiusMax,
+      layerValues
+    });
   }
-  return { ep: dielectric, nx: size, nz: size, boundaries: [b1, b2, b3, b4], objects };
+  return { ep: dielectric, nx: size, nz: size, boundaries: [b1, b2, b3, b4], objects, layerValues, boundaryOptions };
 }
 
 export function applyObjectsToModel(model) {
@@ -343,23 +357,28 @@ function generateBoundary(base, thickness, amp, size, trendType, trendAmp, trend
   return out;
 }
 
-function addRandomRocks(ep, size, layer2, layer3, layer4, rng, objects) {
-  const count = 20 + Math.floor(rng() * 31);
+function addRandomRocks(ep, size, layer2, layer3, layer4, rng, objects, options = {}) {
+  const minCount = Math.max(0, Math.floor(Number(options.minCount ?? 20)));
+  const maxCount = Math.max(minCount, Math.floor(Number(options.maxCount ?? 50)));
+  const count = minCount + Math.floor(rng() * Math.max(1, maxCount - minCount + 1));
+  const radiusMin = Math.max(1, Math.floor(Number(options.radiusMin ?? 5)));
+  const radiusMax = Math.max(radiusMin, Math.floor(Number(options.radiusMax ?? 20)));
+  const values = normalizeLayerValues(options.layerValues, [1, 2, 3, 4, 5]);
   for (let i = 0; i < count; i++) {
     const x = Math.max(0, Math.min(size - 1, Math.floor(rng() * size)));
     let y;
     let epsr;
     if (rng() > 0.6) {
       y = randomInt(rng, layer4[x] + 1, size - 1);
-      epsr = 5 + randomInt(rng, 1, 10) * 0.1;
+      epsr = values[4] + randomInt(rng, 1, 10) * 0.1;
     } else if (rng() > 0.4) {
       y = randomInt(rng, layer3[x] + 1, layer4[x]);
-      epsr = 4 + randomInt(rng, 1, 10) * 0.1;
+      epsr = values[3] + randomInt(rng, 1, 10) * 0.1;
     } else {
       y = randomInt(rng, layer2[x] + 1, layer3[x]);
-      epsr = 3 + randomInt(rng, 1, 10) * 0.1;
+      epsr = values[2] + randomInt(rng, 1, 10) * 0.1;
     }
-    const radius = randomInt(rng, 5, 20);
+    const radius = randomInt(rng, radiusMin, radiusMax);
     const vertices = randomPolygon(x, y, radius, rng);
     objects.push({ type: "polygon", points: vertices.map(p => ({ xM: p.x, zM: p.y })), epsr });
     for (let iz = Math.max(0, y - radius * 2); iz <= Math.min(size - 1, y + radius * 2); iz++) {
@@ -368,6 +387,30 @@ function addRandomRocks(ep, size, layer2, layer3, layer4, rng, objects) {
       }
     }
   }
+}
+
+function normalizeBoundaryOptions(options = {}) {
+  const explicit = Array.isArray(options.boundaries) ? options.boundaries : null;
+  return P5_BOUNDARY_DEFAULTS.map((baseCfg, i) => {
+    const cfg = explicit?.[i] || {};
+    return {
+      base: finiteNumber(cfg.base ?? options[`boundary${i + 1}Base`], baseCfg.base),
+      thickness: positive(cfg.thickness ?? options[`boundary${i + 1}Thickness`], baseCfg.thickness),
+      amp: finiteNumber(cfg.amp ?? options[`boundary${i + 1}Amp`], baseCfg.amp),
+      trendType: String(cfg.trendType ?? options[`boundary${i + 1}Trend`] ?? baseCfg.trendType),
+      trendAmp: finiteNumber(cfg.trendAmp ?? options[`boundary${i + 1}TrendAmp`], baseCfg.trendAmp),
+      trendPeriod: positive(cfg.trendPeriod ?? options[`boundary${i + 1}TrendPeriod`], baseCfg.trendPeriod)
+    };
+  });
+}
+
+function normalizeLayerValues(input, fallback) {
+  const src = Array.isArray(input) || ArrayBuffer.isView(input) ? Array.from(input) : fallback;
+  return Array.from({ length: 5 }, (_, i) => {
+    const value = Number(src[i]);
+    const fb = Number(fallback[i]);
+    return Number.isFinite(value) && value > 0 ? value : (Number.isFinite(fb) && fb > 0 ? fb : i + 1);
+  });
 }
 
 function randomPolygon(x0, y0, r, rng) {

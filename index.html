@@ -111,11 +111,12 @@
       <div class="nav-group">
         <button>建模与解释</button>
         <div class="menu">
-          <button data-page="geo-modeling">Geologic Modeling 地质建模</button>
           <button data-page="manual-geo">Manual Geologic Pipeline 手动地质流水线</button>
           <button data-page="interpret">Geologic Interpretation 地质解释</button>
+          <button data-page="random-p5" data-random-step="p5_1">随机介质模型生成</button>
+          <button data-page="random-p5" data-random-step="p5_2">电磁参数换算</button>
+          <button data-page="random-p5" data-random-step="p5_3">FDTD 仿真</button>
           <button data-page="model">Build 2-D Model 构建二维模型</button>
-          <button data-action="forward">正演模拟</button>
         </div>
       </div>
       <div class="nav-group">
@@ -214,7 +215,6 @@
               <button data-process="global-bg">Remove Background 去背景</button>
               <button data-process="gagc">Gaussian AGC 高斯增益</button>
               <button data-process="fir-frequency">Bandpass 带通</button>
-              <button data-action="run-geology" class="primary">自动地质建模</button>
             </div>
             <p class="muted">处理结果进入 Output Data，可检查后 Hold。</p>
           </div>
@@ -315,9 +315,17 @@
         </div>
         <aside class="panel">
           <h2>Build 2-D Model 构建二维模型</h2>
-          <label>背景 εr<input id="model-epsr" type="number" value="9" step="0.1"></label>
-          <label>背景 σ<input id="model-sigma" type="number" value="0" step="0.001"></label>
+          <label>画布视图
+            <select id="model-view-mode">
+              <option value="geology">手动地质分层图</option>
+              <option value="epsr">εr 电磁参数热图</option>
+            </select>
+          </label>
+          <label>背景 εr<input id="model-epsr" type="number" value="3.2" step="0.1"></label>
+          <label>背景 σ<input id="model-sigma" type="number" value="0.00015" step="0.0001"></label>
           <label>背景 μ<input id="model-mu" type="number" value="1" step="0.1"></label>
+          <h3>分层介质参数</h3>
+          <div id="model-layer-materials" class="layer-material-list"></div>
           <div class="button-row">
             <button data-model-tool="select">选择</button>
             <button data-model-tool="circle">圆形</button>
@@ -364,12 +372,84 @@
         </aside>
       </section>
 
+      <section id="page-random-p5" class="page split">
+        <div class="canvas-card">
+          <canvas id="p5-canvas"></canvas>
+        </div>
+        <aside class="panel">
+          <h2>随机介质正演</h2>
+          <div class="button-row">
+            <button data-random-step="p5_1" class="active">p5_1 随机介质</button>
+            <button data-random-step="p5_2">p5_2 参数换算</button>
+            <button data-random-step="p5_3">p5_3 FDTD</button>
+          </div>
+          <button data-action="p5-run-step" class="primary">运行当前步骤并导出 MAT</button>
+          <h3>p5_1 参数</h3>
+          <label>矩阵尺寸<input id="p5-size" class="p5-control" type="number" value="1000" min="33" step="2"></label>
+          <label>IntDis m<input id="p5-intdis" class="p5-control" type="number" value="0.02" min="0.001" step="0.001"></label>
+          <label>随机种子<input id="p5-seed" class="p5-control" type="number" value="12345" step="1"></label>
+          <div class="p5-layer-values">
+            <label>层0<input id="p5-layer-0" class="p5-control" type="number" value="1" step="0.1"></label>
+            <label>层1<input id="p5-layer-1" class="p5-control" type="number" value="2" step="0.1"></label>
+            <label>层2<input id="p5-layer-2" class="p5-control" type="number" value="3" step="0.1"></label>
+            <label>层3<input id="p5-layer-3" class="p5-control" type="number" value="4" step="0.1"></label>
+            <label>层4<input id="p5-layer-4" class="p5-control" type="number" value="5" step="0.1"></label>
+          </div>
+          <div class="p5-boundary-grid">
+            <label>B1 base<input id="p5-b1-base" class="p5-control" type="number" value="30"></label>
+            <label>B1 thick<input id="p5-b1-thickness" class="p5-control" type="number" value="300"></label>
+            <label>B1 amp<input id="p5-b1-amp" class="p5-control" type="number" value="10"></label>
+            <label>B1 trend<select id="p5-b1-trend" class="p5-control"><option value="linear">linear</option><option value="exp">exp</option><option value="sin">sin</option><option value="none">none</option></select></label>
+            <label>B1 trend amp<input id="p5-b1-trend-amp" class="p5-control" type="number" value="15"></label>
+            <label>B1 period<input id="p5-b1-trend-period" class="p5-control" type="number" value="200"></label>
+            <label>B2 base<input id="p5-b2-base" class="p5-control" type="number" value="330"></label>
+            <label>B2 thick<input id="p5-b2-thickness" class="p5-control" type="number" value="300"></label>
+            <label>B2 amp<input id="p5-b2-amp" class="p5-control" type="number" value="10"></label>
+            <label>B2 trend<select id="p5-b2-trend" class="p5-control"><option value="linear">linear</option><option value="exp">exp</option><option value="sin">sin</option><option value="none">none</option></select></label>
+            <label>B2 trend amp<input id="p5-b2-trend-amp" class="p5-control" type="number" value="15"></label>
+            <label>B2 period<input id="p5-b2-trend-period" class="p5-control" type="number" value="200"></label>
+            <label>B3 base<input id="p5-b3-base" class="p5-control" type="number" value="630"></label>
+            <label>B3 thick<input id="p5-b3-thickness" class="p5-control" type="number" value="300"></label>
+            <label>B3 amp<input id="p5-b3-amp" class="p5-control" type="number" value="10"></label>
+            <label>B3 trend<select id="p5-b3-trend" class="p5-control"><option value="exp">exp</option><option value="linear">linear</option><option value="sin">sin</option><option value="none">none</option></select></label>
+            <label>B3 trend amp<input id="p5-b3-trend-amp" class="p5-control" type="number" value="15"></label>
+            <label>B3 period<input id="p5-b3-trend-period" class="p5-control" type="number" value="200"></label>
+            <label>B4 base<input id="p5-b4-base" class="p5-control" type="number" value="800"></label>
+            <label>B4 thick<input id="p5-b4-thickness" class="p5-control" type="number" value="300"></label>
+            <label>B4 amp<input id="p5-b4-amp" class="p5-control" type="number" value="10"></label>
+            <label>B4 trend<select id="p5-b4-trend" class="p5-control"><option value="sin">sin</option><option value="linear">linear</option><option value="exp">exp</option><option value="none">none</option></select></label>
+            <label>B4 trend amp<input id="p5-b4-trend-amp" class="p5-control" type="number" value="30"></label>
+            <label>B4 period<input id="p5-b4-trend-period" class="p5-control" type="number" value="800"></label>
+          </div>
+          <label class="toggle-label"><input id="p5-random-rocks" class="p5-control" type="checkbox" checked> 添加随机异常体</label>
+          <div class="p5-layer-values">
+            <label>数量 min<input id="p5-rock-min" class="p5-control" type="number" value="20"></label>
+            <label>数量 max<input id="p5-rock-max" class="p5-control" type="number" value="50"></label>
+            <label>半径 min<input id="p5-rock-radius-min" class="p5-control" type="number" value="5"></label>
+            <label>半径 max<input id="p5-rock-radius-max" class="p5-control" type="number" value="20"></label>
+          </div>
+          <h3>p5_2 / p5_3 参数</h3>
+          <label>空气行 l_THK<input id="p5-air-rows" class="p5-control" type="number" value="30" min="0" step="1"></label>
+          <label>换算频率 MHz<input id="p5-frequency" class="p5-control" type="number" value="500" min="1" step="10"></label>
+          <label>换算 dt ns<input id="p5-conductivity-dt" class="p5-control" type="number" value="0.3125" min="0.0001" step="0.0001"></label>
+          <label>FDTD 模式<select id="p5-fdtd-mode"><option value="tm">TM</option><option value="te">TE</option></select></label>
+          <label>FDTD 道数<input id="p5-fdtd-traces" type="number" value="451" min="1" step="2"></label>
+          <label>FDTD 样点<input id="p5-fdtd-samples" type="number" value="640" min="16" step="20"></label>
+          <label>主频 MHz<input id="p5-fdtd-frequency" type="number" value="500" min="1" step="10"></label>
+          <label>输出步长<input id="p5-fdtd-outstep" type="number" value="10" min="1" step="1"></label>
+          <label>收发距 m<input id="p5-fdtd-offset" type="number" value="0.317" step="0.001"></label>
+          <label>PML 网格<input id="p5-fdtd-pml" type="number" value="10" min="2" step="1"></label>
+          <label>空气层 m<input id="p5-fdtd-air" type="number" value="0.6" min="0" step="0.02"></label>
+          <label>天线 Z m<input id="p5-fdtd-antenna-z" type="number" value="-0.3" step="0.01"></label>
+          <div id="p5-status" class="list muted">p5_1 pending · p5_2 pending · p5_3 pending</div>
+        </aside>
+      </section>
+
       <section id="page-interpret" class="page">
         <div class="panel narrow">
           <h2>Geologic Interpretation 地质解释</h2>
           <p>保留人工解释入口：结合点、线、框标注、道查看器和衰减特征识别界面、空洞、管线、破碎带等异常。</p>
           <div class="button-row">
-            <button data-page="geo-modeling">Geologic Modeling 地质建模</button>
             <button data-page="manual-geo">Manual Pipeline 手动流水线</button>
             <button data-page="radar">Radar Profile 雷达剖面图</button>
             <button data-action="open-trace">Trace Viewer 道查看器</button>
@@ -377,101 +457,6 @@
             <button data-action="save-report">导出解释报告 JSON</button>
           </div>
           <div id="interpret-output" class="list muted">解释结果将在这里显示。</div>
-        </div>
-      </section>
-
-      <section id="page-geo-modeling" class="page">
-        <div class="panel narrow">
-          <h2>Geologic Modeling 地质建模</h2>
-          <p>一键自动追踪与地质模型结果在这里运行；手动流水线已拆分到独立页面。</p>
-          <div class="button-row">
-            <button data-page="interpret">Geologic Interpretation 地质解释</button>
-            <button data-page="manual-geo">Manual Geologic Pipeline 手动地质流水线</button>
-            <button data-action="open-radar-params">Radar Parameters 雷达参数</button>
-            <button data-action="open-trace">Trace Viewer 道查看器</button>
-            <button data-action="show-attenuation">Attenuation 衰减特征</button>
-            <button data-action="save-report">导出解释报告 JSON</button>
-          </div>
-          <div class="geo-controls">
-            <label>auto mode 自动策略
-              <select id="geo-auto-mode">
-                <option value="conservative">Conservative 保守可信</option>
-                <option value="complete">Complete 尽量完整</option>
-              </select>
-            </label>
-            <label>quality threshold 质量阈值<input id="geo-quality-threshold" type="number" value="70" min="0" max="100" step="5"></label>
-            <label>velocity m/ns 速度<input id="geo-velocity" type="number" value="0.10" step="0.01"></label>
-            <label>dt ns 采样间隔<input id="geo-dt" type="number" value="0.3125" step="0.0001"></label>
-            <label>dx m 道间距<input id="geo-dx" type="number" value="0.05" step="0.01"></label>
-            <label>low MHz 低频<input id="geo-lo" type="number" value="20" step="1"></label>
-            <label>high MHz 高频<input id="geo-hi" type="number" value="900" step="10"></label>
-            <label>background traces 背景道窗<input id="geo-bg" type="number" value="25" step="2"></label>
-            <label>AGC samples AGC 样点窗<input id="geo-agc" type="number" value="80" step="5"></label>
-            <label>model depth m 模型深度<input id="geo-depth" type="number" value="24" step="1"></label>
-          </div>
-          <div class="geo-toggles">
-            <label class="toggle-label"><input type="checkbox" id="geo-use-dewow" checked> Dewow 去低频</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-dc" checked> Remove DC 去均值</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-freq" checked> Freq Filter 频率滤波</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-bg" checked> Bg Remove 背景去除</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-sliding" checked> Sliding Bg 滑动背景</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-equalize"> Equalize 均衡</label>
-            <label class="toggle-label"><input type="checkbox" id="geo-use-migration"> Migration 偏移辅助</label>
-            <label class="toggle-label">Gain 增益:
-              <select id="geo-gain-method">
-                <option value="gagc">Gaussian AGC 高斯 AGC</option>
-                <option value="agc">Standard AGC 标准 AGC</option>
-                <option value="power">Power Gain 幂增益</option>
-                <option value="amplitude">Amplitude Decay 振幅衰减</option>
-              </select>
-            </label>
-          </div>
-          <div class="button-row">
-            <button class="primary" data-action="run-geology">自动提取界面并生成地质模型</button>
-            <button data-action="export-geology">导出地质模型 JSON</button>
-            <button data-action="export-geo-image">导出图像</button>
-          </div>
-          <div class="geo-pipeline">
-            <h3>Automatic Process 自动全过程</h3>
-            <div class="geo-step-grid">
-              <button data-geo-step="geo-energy-envelope">1. Hilbert 多属性包络</button>
-              <button data-geo-step="geo-smooth-2d">2. 二维/边缘保持平滑</button>
-              <button data-geo-step="geo-trace-peaks">3. 逐道候选峰检测</button>
-              <button data-geo-step="geo-depth-histogram">4. 深度/倾角候选统计</button>
-              <button data-geo-step="geo-cluster-peaks">5. 二维事件聚类</button>
-              <button data-geo-step="geo-merge-clusters">6. 事件聚类合并</button>
-              <button data-geo-step="geo-support-select">7. 综合支持度筛选</button>
-              <button data-geo-step="geo-track-horizons">8. Viterbi 层位追踪</button>
-              <button data-geo-step="geo-line-smooth">9. 置信度加权线平滑</button>
-              <button data-geo-step="geo-stratigraphy">10. 地层顺序约束</button>
-              <button data-geo-step="geo-classify-model">11. 地层分类模型生成</button>
-            </div>
-            <div class="geo-process-grid">
-              <div>
-                <h3>Step preview 步骤预览</h3>
-                <div class="geo-canvas-wrap"><canvas id="geo-step-canvas"></canvas></div>
-              </div>
-              <div>
-                <h3>Step model / histogram 模型或统计</h3>
-                <div class="geo-step-side">
-                  <div class="geo-step-chart-wrap"><canvas id="geo-step-chart-canvas"></canvas></div>
-                  <div class="geo-step-model-wrap"><canvas id="geo-step-model-canvas"></canvas></div>
-                </div>
-              </div>
-            </div>
-            <div id="geo-step-report" class="list muted">点击上方步骤可查看自动建模全过程。</div>
-          </div>
-          <div class="geo-canvas-grid">
-            <div>
-              <h3>处理后雷达剖面与自动界面</h3>
-              <div class="geo-canvas-wrap"><canvas id="geo-radar-canvas"></canvas></div>
-            </div>
-            <div>
-              <h3>地质建模模型</h3>
-              <div class="geo-canvas-wrap"><canvas id="geo-model-canvas"></canvas></div>
-            </div>
-          </div>
-          <div id="geo-report" class="list muted">尚未生成自动地质模型。</div>
         </div>
       </section>
 
@@ -487,7 +472,6 @@
                 <option value="phase">Phase 相位</option>
                 <option value="frequency">Instant frequency 瞬时频率</option>
                 <option value="semblance">Semblance 相干性</option>
-                <option value="auto">Auto horizons 自动层位</option>
               </select>
             </label>
             <label>cmap 色标
@@ -514,14 +498,13 @@
             <label>pick_radius <input id="manual-pick-radius" type="number" value="3" min="0" max="30" step="1"></label>
           </div>
           <div class="manual-geo-actions">
-            <button data-page="geo-modeling">Auto Geologic Modeling 自动建模</button>
             <button data-action="open-radar-params">Radar Parameters 雷达参数</button>
             <button data-action="manual-new-layer">New Horizon 新建层位</button>
             <button data-action="manual-compute-aids">Compute Aids 计算辅助图</button>
-            <button data-action="manual-import-auto">Use Auto Suggestions 使用自动建议</button>
             <button data-action="manual-undo">Undo 撤销</button>
             <button data-action="manual-redo">Redo 重做</button>
             <button data-action="manual-generate-model" class="primary">Generate Manual Model 生成手动模型</button>
+            <button data-action="manual-transfer-model" class="primary">传递建模</button>
             <button data-action="manual-geo-save">Save Model to Output 保存模型</button>
             <button data-action="manual-export-report">Export Interpretation Report 导出解释报告</button>
             <button data-action="manual-open-model-window">Show Geologic Layers 显示地质分层图</button>

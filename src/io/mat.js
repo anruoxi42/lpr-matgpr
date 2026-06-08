@@ -40,6 +40,41 @@ export function variablesFromForwardResult(result = {}, model = null, params = {
   return vars;
 }
 
+export function variablesFromModelGrid(model = {}, params = {}) {
+  const nx = model.nx || model.numTraces || 0;
+  const nz = model.nz || model.numSamples || 0;
+  const dx = Number(params.IntDis ?? params.distanceStepM ?? params.dxM ?? model.distanceStepM ?? 0.02);
+  const vars = {
+    ep: { data: depthMajorToMat(model.epsrField || model.ep || model.data || new Float32Array(), nx, nz), dims: [nz, nx], type: "single" },
+    mu: { data: depthMajorToMat(model.muField || filled(nx * nz, 1), nx, nz), dims: [nz, nx], type: "single" },
+    sig: { data: depthMajorToMat(model.sigmaField || model.sig || model.cd || new Float32Array(nx * nz), nx, nz), dims: [nz, nx], type: "single" },
+    cd: { data: depthMajorToMat(model.sigmaField || model.cd || model.sig || new Float32Array(nx * nz), nx, nz), dims: [nz, nx], type: "single" },
+    x: { data: Float32Array.from(model.distanceAxisM || axis(nx, dx, 0)), dims: [1, nx], type: "single" },
+    z: { data: Float32Array.from(model.depthAxisM || axis(nz, dx, Number(params.depthOffsetM ?? model.depthOffsetM ?? 0))), dims: [nz, 1], type: "single" },
+    IntDis: { data: Float32Array.of(dx), dims: [1, 1], type: "single" },
+    width: { data: Float32Array.of(nx), dims: [1, 1], type: "single" },
+    rows: { data: Float32Array.of(nz), dims: [1, 1], type: "single" },
+    cols: { data: Float32Array.of(nx), dims: [1, 1], type: "single" },
+    params: JSON.stringify(params || {})
+  };
+  return vars;
+}
+
+export function variablesFromP5Dielectric(result = {}, params = {}) {
+  const nx = result.nx || result.cols || 0;
+  const nz = result.nz || result.rows || 0;
+  const dx = Number(params.IntDis ?? params.distanceStepM ?? params.dxM ?? 0.02);
+  return {
+    ep: { data: depthMajorToMat(result.ep || result.data || new Float32Array(), nx, nz), dims: [nz, nx], type: "single" },
+    IntDis: { data: Float32Array.of(dx), dims: [1, 1], type: "single" },
+    width: { data: Float32Array.of(nx), dims: [1, 1], type: "single" },
+    rows: { data: Float32Array.of(nz), dims: [1, 1], type: "single" },
+    cols: { data: Float32Array.of(nx), dims: [1, 1], type: "single" },
+    layer_values: { data: Float32Array.from(result.layerValues || params.layerValues || []), dims: [1, (result.layerValues || params.layerValues || []).length], type: "single" },
+    params: JSON.stringify(params || {})
+  };
+}
+
 export function variablesFromCurrentDataset(ds = {}) {
   const data = ds.data || new Float32Array();
   const nt = ds.numTraces || 0;
@@ -133,6 +168,16 @@ function traceMajorToMat(data, traces, samples) {
 function depthMajorToMat(data, nx, nz) {
   const out = new Float32Array(nx * nz);
   for (let ix = 0; ix < nx; ix++) for (let iz = 0; iz < nz; iz++) out[iz + ix * nz] = data[iz * nx + ix] || 0;
+  return out;
+}
+
+function axis(count, step, offset = 0) {
+  return Float32Array.from({ length: Math.max(0, count) }, (_, i) => offset + i * step);
+}
+
+function filled(count, value) {
+  const out = new Float32Array(Math.max(0, count));
+  out.fill(value);
   return out;
 }
 

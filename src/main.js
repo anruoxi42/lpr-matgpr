@@ -6,7 +6,7 @@ import { pickPeaksNearPoint, traceFromSeed, snapPointToPeak } from "./processing
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
 import { DEFAULT_MODEL_MATERIALS, manualHorizonsToModel, normalizeObject } from "./modeling/model2d.js";
 import { MATERIAL_PRESETS } from "./modeling/materials.js";
-import { variablesFromCurrentDataset, variablesFromForwardResult, writeMatFile } from "./io/mat.js";
+import { variablesFromCurrentDataset, variablesFromForwardResult, variablesFromModelGrid, variablesFromP5Dielectric, writeMatFile } from "./io/mat.js";
 import { parseMatFileAsync } from "./io/mat-reader.js";
 import { readTheme } from "./theme.js";
 
@@ -17,15 +17,20 @@ const pending = new Map();
 let displaySource = "current";
 let threeVolume = null;
 let velocityPoints = [];
-let model = { background: { epsr: 9, sigma: 0.0005, mu: 1 }, layerMaterials: DEFAULT_MODEL_MATERIALS, objects: [] };
+let model = { sourceMode: "empty", background: { ...DEFAULT_MODEL_MATERIALS[0] }, layerMaterials: DEFAULT_MODEL_MATERIALS.map(m => ({ ...m })), manualSnapshot: null, objects: [] };
 let model2dResult = null;
 let model2dDirty = true;
 let fdtdForwardResult = null;
 let selectedModelObjectId = "";
 let modelDrag = null;
 let modelTool = "select";
+let modelViewMode = "geology";
+let modelDraftPolygon = [];
+let modelHitCycle = { key: "", ids: [], index: -1 };
+let modelToolDefaults = { circleRadiusM: 0.25, pipeRadiusM: 0.18, rectangleWidthM: 0.8, rectangleHeightM: 0.45 };
 let fdtdSrcPulse = null;
 let fdtdP5Preset = false;
+let randomP5State = { activeStep: "p5_1", dielectric: null, model2d: null, fdtd: null, params: null };
 let radarSelections = [];
 let radarAnnotations = [];
 let lastMergedSelection = null;
@@ -72,8 +77,7 @@ const algorithmDocs = [
   ["时深转换", "按层状速度模型把双程走时采样映射成深度采样。", "输入 vofh=[velocity, thickness] 与 dz；结果带 depthAxisM，可在雷达剖面切换深度轴。"],
   ["瞬时属性/质心频率", "Hilbert 解析信号给出包络、相位、瞬时频率；质心频率表示频谱能量重心。", "用于识别强反射、相位突变、频散和介质变化；结果进入 Output Data 或曲线窗口。"],
   ["衰减分析", "统计每个深度样点的解析信号功率，并拟合 power-law 与 exponential 衰减曲线。", "用于判断介质吸收、深部能量衰减和资料质量；结果在曲线窗口显示并可保存为 Output Data。"],
-  ["静校正", "根据高程、表层速度和基准面计算每道时间零点修正量，校正近地表起伏影响。", "输入高程序列、表层/次表层速度与基准面；适合地表不平或天线高度变化数据。"],
-  ["地质建模流水线", "能量包络 -> 二维平滑 -> 峰值 -> 深度直方图聚类 -> 聚类合并 -> 支持度筛选 -> 层位追踪 -> 线平滑 -> 层序约束 -> 地层分类。", "可一键自动追踪，也可在 Geologic Modeling 地质建模页逐步运行，每步都会显示用途和中间统计。"]
+  ["静校正", "根据高程、表层速度和基准面计算每道时间零点修正量，校正近地表起伏影响。", "输入高程序列、表层/次表层速度与基准面；适合地表不平或天线高度变化数据。"]
 ];
 
 const $ = sel => document.querySelector(sel);
@@ -94,6 +98,7 @@ new MutationObserver(() => {
     if (p.id === "page-radar")       { radar.render(); refresh(); }
     if (p.id === "page-velocity")    { velocityRenderer?.setTheme(canvasTheme); renderVelocity(); }
     if (p.id === "page-model")       renderModel();
+    if (p.id === "page-random-p5")   renderRandomP5Workbench();
     if (p.id === "page-geo-modeling") drawGeologyResult();
     if (p.id === "page-manual-geo")  drawManualWorkbench();
   });
@@ -134,6 +139,19 @@ function download(blob, name) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function downloadMatWithPrompt(variables, defaultName) {
+  const suggested = ensureMatName(defaultName || "lpr_export.mat");
+  const chosen = prompt("MAT 文件名", suggested);
+  if (chosen === null) return false;
+  const name = ensureMatName(chosen.trim() || suggested);
+  const mat = writeMatFile(variables);
+  download(new Blob([mat], { type: "application/octet-stream" }), name);
+  return true;
+}
+function ensureMatName(name) {
+  const clean = String(name || "lpr_export.mat").trim() || "lpr_export.mat";
+  return /\.mat$/i.test(clean) ? clean : `${clean}.mat`;
 }
 function runWorker(op, dataset, params = {}) {
   const id = crypto.randomUUID();
@@ -1165,6 +1183,7 @@ function switchPage(name) {
   if (name === "export") syncExportControls();
   if (name === "velocity") renderVelocity();
   if (name === "model") renderModel();
+  if (name === "random-p5") renderRandomP5Workbench();
   if (name === "three") renderThree();
   if (name === "interpret" || name === "geo-modeling" || name === "manual-geo") {
     syncGeoControlsFromDataset();
@@ -2636,10 +2655,10 @@ function lineFromManualLayer(layer, ds) {
 
 function generateManualModel() {
   const ds = currentDisplayed();
-  if (!ds) return toast("请先导入数据", "warn");
+  if (!ds) { toast("请先导入数据", "warn"); return null; }
   const st = ensureManualState();
   const usable = st.layers.filter(l => l.visible && l.points.length >= 2);
-  if (!usable.length) return toast("请先手动画出至少一条层位线", "warn");
+  if (!usable.length) { toast("请先手动画出至少一条层位线", "warn"); return null; }
   const horizons = usable.map(l => lineFromManualLayer(l, ds)).sort((a, b) => a.medianDepth - b.medianDepth);
   const rp = getEffectiveRadarParams(ds), modelSamples = 480, depthMax = manualProfileDepthMax(ds);
   const modelData = new Uint8Array(modelSamples * ds.numTraces), uncertaintyData = new Uint8Array(modelSamples * ds.numTraces);
@@ -2662,6 +2681,44 @@ function generateManualModel() {
   drawManualModelWindow();
   $("#manual-geo-report").innerHTML = `<b>Manual model generated 手动模型已生成</b><p>${horizons.length} 条人工层位；人工线优先，短缺口已插值，长缺口标为未解释。</p>`;
   toast("手动地质模型已生成");
+  return manualModelResult;
+}
+
+function cloneManualModelSnapshot(result = manualModelResult) {
+  if (!result) return null;
+  return {
+    ...result,
+    data: result.data ? Float32Array.from(result.data) : null,
+    modelData: result.modelData ? Uint8Array.from(result.modelData) : null,
+    uncertaintyData: result.uncertaintyData ? Uint8Array.from(result.uncertaintyData) : null,
+    horizons: (result.horizons || []).map(h => ({
+      ...h,
+      line: Float32Array.from(h.line || []),
+      valid: h.valid ? Uint8Array.from(h.valid) : h.valid,
+      confidence: h.confidence ? Float32Array.from(h.confidence) : h.confidence
+    })),
+    transferredAt: new Date().toISOString()
+  };
+}
+
+function transferManualModelToBuilder() {
+  const result = manualModelResult || generateManualModel();
+  if (!result) return;
+  const snapshot = cloneManualModelSnapshot(result);
+  model.sourceMode = "manual-snapshot";
+  model.manualSnapshot = snapshot;
+  model.background = { ...(model.layerMaterials?.[0] || DEFAULT_MODEL_MATERIALS[0]) };
+  ensureModelLayerMaterials(snapshot.horizons.length + 1, true);
+  if ($("#model-traces")) $("#model-traces").value = oddAtLeast(snapshot.modelTraces || snapshot.numTraces || 301, 9);
+  if ($("#model-depth-samples")) $("#model-depth-samples").value = oddAtLeast(snapshot.modelSamples || 481, 9);
+  if ($("#model-depth-max")) $("#model-depth-max").value = formatDepthInput(snapshot.modelDepthMax || 6);
+  if ($("#model-dx")) $("#model-dx").value = axisNumber(snapshot.distanceStep || snapshot.dxM || 0.05);
+  if ($("#model-view-mode")) $("#model-view-mode").value = "geology";
+  modelViewMode = "geology";
+  markModel2dDirty();
+  switchPage("model");
+  renderModel();
+  toast("手动地质分层已作为快照传递到二维建模");
 }
 
 function saveManualGeoOutput() {
@@ -2849,6 +2906,7 @@ function exportManualReport(format, title) {
 
 function drawGeologyResult() {
   if (!geologyResult) return;
+  if (!$("#geo-report") || !$("#geo-radar-canvas") || !$("#geo-model-canvas")) return;
   renderDatasetCanvas($("#geo-radar-canvas"), { data: geologyResult.data, numTraces: geologyResult.numTraces, numSamples: geologyResult.numSamples }, {
     cmap: "seismic", min: -2.2, max: 2.2, horizons: geologyResult.horizons, modelDepthMax: geologyResult.modelDepthMax, depthMax: geologyResult.modelDepthMax, distanceStep: geologyResult.distanceStep || geologyResult.dx, axes: true, sampleMax: Math.ceil(geologyResult.modelDepthMax / geologyResult.depthStep)
   });
@@ -3087,6 +3145,7 @@ function bindUi() {
   $("#drop-zone").ondrop = e => { e.preventDefault(); $("#drop-zone").classList.remove("over"); importFiles(e.dataTransfer.files); };
   document.body.addEventListener("click", e => {
     const action = e.target.dataset.action, page = e.target.dataset.page, proc = e.target.dataset.process, exp = e.target.dataset.export;
+    const randomStep = e.target.dataset.randomStep;
     const toolBtn = e.target.closest?.("[data-manual-tool]");
     const layerBtn = e.target.closest?.("[data-manual-layer]");
     const visibleBtn = e.target.closest?.("[data-manual-visible]");
@@ -3118,6 +3177,7 @@ function bindUi() {
       drawManualWorkbench();
     }
     if (page) switchPage(page);
+    if (randomStep) setRandomP5Step(randomStep);
     if (proc) openProcess(proc);
     if (exp) exportData(exp);
     if (e.target.dataset.radarMode) setRadarMode(e.target.dataset.radarMode);
@@ -3156,6 +3216,7 @@ function bindUi() {
       if (st.future.length) { st.history.push(cloneManualLayers(st.layers)); st.layers = st.future.pop(); st.activeLayerId = st.layers[0]?.id || ""; drawManualWorkbench(); }
     }
     if (action === "manual-generate-model") generateManualModel();
+    if (action === "manual-transfer-model") transferManualModelToBuilder();
     if (action === "manual-geo-save") saveManualGeoOutput();
     if (action === "manual-auto-range") setManualAutoRange();
     if (action === "manual-reset-view") resetManualView();
@@ -3177,6 +3238,7 @@ function bindUi() {
     if (action === "velocity-1d") toast("1-D velocity model 已使用速度点表作为第一版模型。", "warn");
     if (action === "velocity-2d") toast("2-D velocity model 可由 Model Builder 生成。", "warn");
     if (action === "forward") forwardModel();
+    if (action === "p5-run-step") runRandomP5Step();
     if (action === "make-xyz") toast("Make XYZ 已建立入口：第一版使用 .2B 位置元数据或手动测线间距。", "warn");
     if (action === "create-3d") create3D();
     if (action === "save-report") download(new Blob([JSON.stringify({ velocityPoints, model }, null, 2)], {type:"application/json"}), "interpretation-report.json");
@@ -3198,6 +3260,12 @@ function bindUi() {
   $("#manual-snap")?.addEventListener("change", e => { ensureManualState().snapEnabled = e.target.checked; drawManualWorkbench(); });
   $("#manual-connect")?.addEventListener("change", e => { ensureManualState().connectEnabled = e.target.checked; drawManualWorkbench(); });
   $("#manual-pick-radius")?.addEventListener("input", () => drawManualWorkbench());
+  $("#model-view-mode")?.addEventListener("change", e => { modelViewMode = e.target.value || "geology"; renderModel(); });
+  $("#model-layer-materials")?.addEventListener("change", e => { if (e.target.dataset.layerMaterial) updateLayerMaterialFromInput(e.target); });
+  $$(".p5-control").forEach(el => el.addEventListener("change", () => {
+    randomP5State = { activeStep: randomP5State.activeStep || "p5_1", dielectric: null, model2d: null, fdtd: null, params: null };
+    renderRandomP5Workbench();
+  }));
   $("#radar-scale-x")?.addEventListener("change", applyRadarDisplayScale);
   $("#radar-scale-y")?.addEventListener("change", applyRadarDisplayScale);
   $("#radar-scale-x")?.addEventListener("input", applyRadarDisplayScale);
@@ -3367,6 +3435,178 @@ function simpleVelocityCalc() {
   const v = 0.299792458 / Math.sqrt(epsr);
   toast(`V = ${v.toFixed(4)} m/ns`);
 }
+
+function randomWorkerDataset() {
+  return {
+    data: new Float32Array([0]),
+    numTraces: 1,
+    numSamples: 1,
+    name: "random_p5",
+    meta: { radarParams: { dtNs: 0.3125, dxM: 0.02, velocityMPerNs: 0.1, vofhText: "0.1,0" } }
+  };
+}
+
+function collectRandomP5Params() {
+  const size = Math.max(32, Math.floor(Number($("#p5-size")?.value || 1000)));
+  const IntDis = finiteNumber($("#p5-intdis")?.value, 0.02);
+  const layerValues = [1, 2, 3, 4, 5].map((fallback, i) => finiteNumber($(`#p5-layer-${i}`)?.value, fallback));
+  const boundaries = [1, 2, 3, 4].map(i => ({
+    base: finiteNumber($(`#p5-b${i}-base`)?.value, [30, 330, 630, 800][i - 1]),
+    thickness: finiteNumber($(`#p5-b${i}-thickness`)?.value, 300),
+    amp: finiteNumber($(`#p5-b${i}-amp`)?.value, 10),
+    trendType: $(`#p5-b${i}-trend`)?.value || ["linear", "linear", "exp", "sin"][i - 1],
+    trendAmp: finiteNumber($(`#p5-b${i}-trend-amp`)?.value, [15, 15, 15, 30][i - 1]),
+    trendPeriod: finiteNumber($(`#p5-b${i}-trend-period`)?.value, [200, 200, 200, 800][i - 1])
+  }));
+  return {
+    size,
+    IntDis,
+    distanceStepM: IntDis,
+    dxM: IntDis,
+    seed: Math.floor(finiteNumber($("#p5-seed")?.value, 12345)),
+    layerValues,
+    boundaries,
+    randomRocks: $("#p5-random-rocks")?.checked !== false,
+    rockMinCount: Math.max(0, Math.floor(finiteNumber($("#p5-rock-min")?.value, 20))),
+    rockMaxCount: Math.max(0, Math.floor(finiteNumber($("#p5-rock-max")?.value, 50))),
+    rockRadiusMin: Math.max(1, Math.floor(finiteNumber($("#p5-rock-radius-min")?.value, 5))),
+    rockRadiusMax: Math.max(1, Math.floor(finiteNumber($("#p5-rock-radius-max")?.value, 20))),
+    airRows: Math.max(0, Math.floor(finiteNumber($("#p5-air-rows")?.value, 30))),
+    frequencyHz: Math.max(1, finiteNumber($("#p5-frequency")?.value, 500) * 1e6),
+    conductivityDtNs: finiteNumber($("#p5-conductivity-dt")?.value, 0.3125)
+  };
+}
+
+function collectRandomFdtdParams(modelPayload) {
+  const step = modelPayload?.distanceStepM || finiteNumber($("#p5-intdis")?.value, 0.02);
+  const samples = Math.max(16, Math.floor(finiteNumber($("#p5-fdtd-samples")?.value, 640)));
+  const outstep = Math.max(1, Math.floor(finiteNumber($("#p5-fdtd-outstep")?.value, 10)));
+  const fdtd = {
+    traceCount: Math.max(1, Math.floor(finiteNumber($("#p5-fdtd-traces")?.value, 451))),
+    samples,
+    frequencyHz: Math.max(1, finiteNumber($("#p5-fdtd-frequency")?.value, 500) * 1e6),
+    receiverOffsetM: finiteNumber($("#p5-fdtd-offset")?.value, 0.317),
+    npml: Math.max(2, Math.floor(finiteNumber($("#p5-fdtd-pml")?.value, 10))),
+    outstep,
+    airThicknessM: Math.max(0, finiteNumber($("#p5-fdtd-air")?.value, 0.6)),
+    antennaZ: finiteNumber($("#p5-fdtd-antenna-z")?.value, -0.3),
+    p5Mode: true,
+    dtS: 0.3125e-9 / 10,
+    iterations: samples * outstep,
+    startX: 50 * step,
+    endX: 950 * step,
+    srcpulse: shiftedP5SrcPulse(samples, outstep)
+  };
+  return fdtd;
+}
+
+function setRandomP5Step(step) {
+  randomP5State.activeStep = step || "p5_1";
+  $$("[data-random-step]").forEach(btn => btn.classList.toggle("active", btn.dataset.randomStep === randomP5State.activeStep));
+  renderRandomP5Workbench();
+}
+
+async function ensureRandomDielectric() {
+  if (randomP5State.dielectric?.data?.length) return randomP5State.dielectric;
+  const params = collectRandomP5Params();
+  const result = await runWorker("p5-random-model", randomWorkerDataset(), params);
+  randomP5State = { ...randomP5State, dielectric: { ...result, ep: result.data }, model2d: null, fdtd: null, params };
+  return randomP5State.dielectric;
+}
+
+async function ensureRandomConductivityModel() {
+  if (randomP5State.model2d?.epsrField?.length) return randomP5State.model2d;
+  const dielectric = await ensureRandomDielectric();
+  const params = { ...collectRandomP5Params(), ep: dielectric.data, nx: dielectric.numTraces, nz: dielectric.numSamples };
+  const result = await runWorker("p5-conductivity-model", randomWorkerDataset(), params);
+  randomP5State = { ...randomP5State, model2d: result.model2d, params };
+  return randomP5State.model2d;
+}
+
+async function runRandomP5Step(step = randomP5State.activeStep) {
+  try {
+    setRandomP5Step(step);
+    $("#footer-status").textContent = `Running ${step}...`;
+    if (step === "p5_1") {
+      const params = collectRandomP5Params();
+      const result = await runWorker("p5-random-model", randomWorkerDataset(), params);
+      randomP5State = { activeStep: step, dielectric: { ...result, ep: result.data }, model2d: null, fdtd: null, params };
+      downloadMatWithPrompt(variablesFromP5Dielectric(randomP5State.dielectric, params), "p5_1_dielectric.mat");
+      toast("p5_1 随机介质模型已生成");
+    } else if (step === "p5_2") {
+      const dielectric = await ensureRandomDielectric();
+      const params = { ...collectRandomP5Params(), ep: dielectric.data, nx: dielectric.numTraces, nz: dielectric.numSamples };
+      const result = await runWorker("p5-conductivity-model", randomWorkerDataset(), params);
+      randomP5State = { ...randomP5State, activeStep: step, model2d: result.model2d, params };
+      downloadMatWithPrompt(variablesFromModelGrid(result.model2d, params), "p5_2_Model.mat");
+      toast("p5_2 电磁参数换算已完成");
+    } else {
+      const modelPayload = await ensureRandomConductivityModel();
+      const fdtd = collectRandomFdtdParams(modelPayload);
+      if (!fdtd.srcpulse) toast("P2_pulse_new.mat 未加载，p5 正演将使用内置 Ricker 脉冲。", "warn");
+      const mode = $("#p5-fdtd-mode")?.value || "tm";
+      const result = await runWorker(mode === "te" ? "fdtd-te2d" : "fdtd-tm2d", randomWorkerDataset(), { model2d: modelPayload, fdtd });
+      randomP5State = { ...randomP5State, activeStep: step, fdtd: result };
+      downloadMatWithPrompt(variablesFromForwardResult(result, modelPayload, { workflow: "random-p5", mode, ...fdtd }), "p5_3_radar_gram.mat");
+      toast(`p5_3 ${mode.toUpperCase()} FDTD 仿真已完成`);
+    }
+    $("#footer-status").textContent = `${step} completed`;
+    renderRandomP5Workbench();
+  } catch (error) {
+    $("#footer-status").textContent = `${step} failed`;
+    toast(error.message || String(error), "err");
+  }
+}
+
+function depthMajorToTraceDataset(data, nx, nz, name = "model") {
+  const out = new Float32Array(nx * nz);
+  for (let ix = 0; ix < nx; ix++) for (let iz = 0; iz < nz; iz++) out[ix * nz + iz] = data[iz * nx + ix] || 0;
+  return { data: out, numTraces: nx, numSamples: nz, name };
+}
+
+function p5BoundaryHorizons(boundaries, intDis, offset = 0) {
+  return (boundaries || []).map((line, i) => ({ name: `B${i + 1}`, line: Float32Array.from(line || [], v => offset + Number(v) * intDis) }));
+}
+
+function renderRandomP5Workbench() {
+  const canvas = $("#p5-canvas");
+  if (!canvas) return;
+  const params = randomP5State.params || collectRandomP5Params();
+  let ds = null;
+  let opts = { axes: true, colorbar: true, cmap: "jet", min: 1, max: 6, distanceStep: params.IntDis || 0.02 };
+  if (randomP5State.activeStep === "p5_3" && randomP5State.fdtd?.data?.length) {
+    ds = { data: randomP5State.fdtd.data, numTraces: randomP5State.fdtd.numTraces, numSamples: randomP5State.fdtd.numSamples, name: "p5_3_radar_gram" };
+    opts = { axes: true, colorbar: true, cmap: "gray", min: -0.0001, max: 0.0001, distanceStep: params.IntDis || 0.02 };
+  } else if (randomP5State.model2d?.epsrField?.length && randomP5State.activeStep !== "p5_1") {
+    const m = randomP5State.model2d;
+    ds = depthMajorToTraceDataset(m.epsrField, m.nx, m.nz, "p5_2_Model");
+    opts = { ...opts, min: 1, max: Math.max(...Array.from(params.layerValues || [5])) + 1, horizons: p5BoundaryHorizons(randomP5State.dielectric?.boundaries, params.IntDis || 0.02, -Math.max(0, params.airRows || 30) * (params.IntDis || 0.02)) };
+  } else if (randomP5State.dielectric?.data?.length) {
+    const d = randomP5State.dielectric;
+    ds = depthMajorToTraceDataset(d.data, d.numTraces, d.numSamples, "p5_1_dielectric");
+    opts = { ...opts, min: 1, max: Math.max(...Array.from(params.layerValues || [5])) + 1, horizons: p5BoundaryHorizons(d.boundaries, params.IntDis || 0.02) };
+  }
+  if (ds) {
+    renderDatasetCanvas(canvas, ds, opts);
+  } else {
+    const ctxInfo = setupCanvas(canvas, { axes: false });
+    ctxInfo.ctx.fillStyle = canvasTheme.bg0;
+    ctxInfo.ctx.fillRect(0, 0, ctxInfo.cssW, ctxInfo.cssH);
+    ctxInfo.ctx.fillStyle = canvasTheme.t2;
+    ctxInfo.ctx.font = "13px Consolas";
+    ctxInfo.ctx.fillText("Run p5_1 to generate a random dielectric model.", 18, 30);
+  }
+  const status = $("#p5-status");
+  if (status) {
+    const pieces = [
+      randomP5State.dielectric ? `p5_1 ${randomP5State.dielectric.numTraces}x${randomP5State.dielectric.numSamples}` : "p5_1 pending",
+      randomP5State.model2d ? "p5_2 converted" : "p5_2 pending",
+      randomP5State.fdtd ? `p5_3 ${randomP5State.fdtd.numTraces} traces` : "p5_3 pending"
+    ];
+    status.textContent = pieces.join(" · ");
+  }
+}
+
 function forwardModel() {
   const nt = 300, ns = 512, data = new Float32Array(nt*ns);
   for (const o of model.objects) {
@@ -3377,18 +3617,41 @@ function forwardModel() {
   displaySource = "output"; $("#display-mode").value = "output"; toast("正演模拟已生成 Output Data");
 }
 
+function modelLayerDefault(index) {
+  const base = DEFAULT_MODEL_MATERIALS[Math.min(index, DEFAULT_MODEL_MATERIALS.length - 1)] || DEFAULT_MODEL_MATERIALS[0];
+  return { ...base, id: `layer${index}`, name: `Layer ${index + 1}` };
+}
+
+function ensureModelLayerMaterials(count = 1, resetMissing = false) {
+  const n = Math.max(1, Math.floor(Number(count) || 1));
+  const current = Array.isArray(model.layerMaterials) ? model.layerMaterials : [];
+  model.layerMaterials = Array.from({ length: n }, (_, i) => {
+    const existing = current[i];
+    if (existing && !resetMissing) return { ...modelLayerDefault(i), ...existing, id: existing.id || `layer${i}`, name: existing.name || `Layer ${i + 1}` };
+    if (existing && resetMissing) return { ...modelLayerDefault(i), ...existing, id: existing.id || `layer${i}`, name: existing.name || `Layer ${i + 1}` };
+    return modelLayerDefault(i);
+  });
+  model.background = { ...model.layerMaterials[0] };
+  return model.layerMaterials;
+}
+
+function currentModelLayerCount() {
+  return modelSourceHorizons().length + 1;
+}
+
 function currentModelOptions() {
   const ds = currentDisplayed();
   const rp = getEffectiveRadarParams(ds);
-  const numTraces = oddAtLeast(Number($("#model-traces")?.value || ds?.numTraces || 301), 9);
-  const depthSamples = oddAtLeast(Number($("#model-depth-samples")?.value || 241), 9);
-  const depthMaxM = finiteNumber($("#model-depth-max")?.value, manualModelResult?.modelDepthMax || rp.depthMaxM || inferredDepthMax(ds));
-  const distanceStepM = finiteNumber($("#model-dx")?.value, rp.dxM || datasetDxM(ds));
+  const snapshot = model.sourceMode === "manual-snapshot" ? model.manualSnapshot : null;
+  const numTraces = oddAtLeast(Number($("#model-traces")?.value || snapshot?.modelTraces || ds?.numTraces || 301), 9);
+  const depthSamples = oddAtLeast(Number($("#model-depth-samples")?.value || snapshot?.modelSamples || 241), 9);
+  const depthMaxM = finiteNumber($("#model-depth-max")?.value, snapshot?.modelDepthMax || rp.depthMaxM || inferredDepthMax(ds));
+  const distanceStepM = finiteNumber($("#model-dx")?.value, snapshot?.distanceStep || rp.dxM || datasetDxM(ds));
   const airThicknessM = Math.max(0, Number($("#fdtd-air")?.value || 0.6));
   const background = {
-    epsr: finiteNumber($("#model-epsr")?.value, model.background.epsr),
-    sigma: finiteNumber($("#model-sigma")?.value, model.background.sigma),
-    mu: finiteNumber($("#model-mu")?.value, model.background.mu)
+    epsr: finiteNumber($("#model-epsr")?.value, model.layerMaterials?.[0]?.epsr ?? model.background.epsr),
+    sigma: finiteNumber($("#model-sigma")?.value, model.layerMaterials?.[0]?.sigma ?? model.background.sigma),
+    mu: finiteNumber($("#model-mu")?.value, model.layerMaterials?.[0]?.mu ?? model.background.mu)
   };
   return { numTraces, depthSamples, depthMaxM, distanceStepM, depthOffsetM: -airThicknessM, airThicknessM, conductivityMode: "p5", conductivityDtNs: 0.3125, frequencyHz: 500e6, background };
 }
@@ -3433,16 +3696,16 @@ function oddAtLeast(value, min) {
 }
 
 function modelSourceHorizons() {
-  if (manualModelResult?.horizons?.length) return manualModelResult.horizons;
-  if (geologyResult?.horizons?.length) return geologyResult.horizons;
+  if (model.sourceMode === "manual-snapshot" && model.manualSnapshot?.horizons?.length) return model.manualSnapshot.horizons;
   return [];
 }
 
 function rebuildModel2d() {
   if (!model2dDirty && model2dResult) return model2dResult;
   const opts = currentModelOptions();
-  model.background = opts.background;
-  model.layerMaterials = (model.layerMaterials?.length ? model.layerMaterials : DEFAULT_MODEL_MATERIALS).map((m, i) => i === 0 ? { ...m, ...opts.background } : m);
+  ensureModelLayerMaterials(currentModelLayerCount());
+  model.layerMaterials[0] = { ...model.layerMaterials[0], ...opts.background };
+  model.background = { ...model.layerMaterials[0] };
   model.objects = (model.objects || []).map(normalizeObject);
   model2dResult = manualHorizonsToModel(modelSourceHorizons(), { ...opts, layerMaterials: model.layerMaterials, objects: model.objects });
   model2dDirty = false;
@@ -3456,7 +3719,10 @@ function markModel2dDirty() {
 
 function setModelTool(tool) {
   modelTool = tool || "select";
+  if (modelTool !== "polygon" && modelDraftPolygon.length) modelDraftPolygon = [];
   $$("[data-model-tool]").forEach(btn => btn.classList.toggle("active", btn.dataset.modelTool === modelTool));
+  updateModelCursor();
+  renderModel();
 }
 
 function modelPlot(rect) {
@@ -3493,6 +3759,57 @@ function modelCanvasToWorld(x, y, rect, result = model2dResult || rebuildModel2d
   return { xM: Math.max(bounds.xMin, Math.min(bounds.xMax, xM)), zM: Math.max(bounds.zMin, Math.min(bounds.zMax, zM)) };
 }
 
+function syncModelBackgroundInputs() {
+  const mat = model.layerMaterials?.[0] || model.background || DEFAULT_MODEL_MATERIALS[0];
+  if ($("#model-epsr") && document.activeElement !== $("#model-epsr")) $("#model-epsr").value = materialNumber(mat.epsr);
+  if ($("#model-sigma") && document.activeElement !== $("#model-sigma")) $("#model-sigma").value = materialNumber(mat.sigma);
+  if ($("#model-mu") && document.activeElement !== $("#model-mu")) $("#model-mu").value = materialNumber(mat.mu);
+}
+
+function materialNumber(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  if (Math.abs(n) > 0 && Math.abs(n) < 0.01) return n.toPrecision(3).replace(/\.?0+e/, "e");
+  return axisNumber(n);
+}
+
+function renderLayerMaterialEditor() {
+  const wrap = $("#model-layer-materials");
+  if (!wrap) return;
+  ensureModelLayerMaterials(currentModelLayerCount());
+  const horizons = modelSourceHorizons();
+  wrap.innerHTML = model.layerMaterials.map((mat, i) => {
+    const top = i === 0 ? "Surface" : (horizons[i - 1]?.name || `H${i}`);
+    const bottom = i < horizons.length ? (horizons[i]?.name || `H${i + 1}`) : "Bottom";
+    return `<div class="layer-material-row">
+      <b>${escapeHtml(mat.name || `Layer ${i + 1}`)}</b>
+      <span>${escapeHtml(top)} - ${escapeHtml(bottom)}</span>
+      <label>εr<input data-layer-material="${i}" data-field="epsr" type="number" value="${materialNumber(mat.epsr)}" min="1" step="0.1"></label>
+      <label>σ<input data-layer-material="${i}" data-field="sigma" type="number" value="${materialNumber(mat.sigma)}" min="0" step="0.0001"></label>
+      <label>μ<input data-layer-material="${i}" data-field="mu" type="number" value="${materialNumber(mat.mu)}" min="0.01" step="0.1"></label>
+    </div>`;
+  }).join("");
+  syncModelBackgroundInputs();
+}
+
+function updateLayerMaterialFromInput(input) {
+  const index = Number(input.dataset.layerMaterial);
+  const field = input.dataset.field;
+  if (!Number.isInteger(index) || !field) return;
+  ensureModelLayerMaterials(currentModelLayerCount());
+  const mat = model.layerMaterials[index];
+  const value = Number(input.value);
+  if (field === "epsr" && Number.isFinite(value) && value > 0) mat.epsr = value;
+  if (field === "sigma" && Number.isFinite(value) && value >= 0) mat.sigma = value;
+  if (field === "mu" && Number.isFinite(value) && value > 0) mat.mu = value;
+  if (index === 0) {
+    model.background = { ...mat };
+    syncModelBackgroundInputs();
+  }
+  markModel2dDirty();
+  renderModel();
+}
+
 function renderModel() {
   const cv = $("#model-canvas");
   if (!cv) return;
@@ -3508,14 +3825,25 @@ function renderModel() {
   ctx.save();
   ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
   const img = ctx.createImageData(Math.max(1, Math.floor(plot.w)), Math.max(1, Math.floor(plot.h)));
+  const showGeology = modelViewMode === "geology" && model.sourceMode === "manual-snapshot" && model.manualSnapshot?.horizons?.length;
+  const geoPalette = [[234,215,183],[214,191,130],[183,193,138],[143,182,161],[120,149,178],[111,116,132],[68,72,87]];
   for (let py = 0; py < img.height; py++) {
     const iz = Math.min(result.nz - 1, Math.floor(py / Math.max(1, img.height - 1) * result.nz));
     for (let px = 0; px < img.width; px++) {
       const ix = Math.min(result.nx - 1, Math.floor(px / Math.max(1, img.width - 1) * result.nx));
-      const epsr = result.epsrField[iz * result.nx + ix], q = Math.max(0, Math.min(1, (epsr - 1) / 30)), i = (py * img.width + px) * 4;
-      img.data[i] = 20 + Math.round(q * 180);
-      img.data[i + 1] = 22 + Math.round(q * 130);
-      img.data[i + 2] = 26 + Math.round((1 - q) * 80);
+      const i = (py * img.width + px) * 4;
+      if (showGeology) {
+        const depth = result.depthAxisM[iz];
+        let layer = 0;
+        for (const h of result.horizons || []) if (depth >= horizonDepthAtTrace(h, ix, result.nx)) layer++;
+        const c = geoPalette[Math.min(layer, geoPalette.length - 1)];
+        img.data[i] = c[0]; img.data[i + 1] = c[1]; img.data[i + 2] = c[2];
+      } else {
+        const epsr = result.epsrField[iz * result.nx + ix], q = Math.max(0, Math.min(1, (epsr - 1) / 30));
+        img.data[i] = 20 + Math.round(q * 180);
+        img.data[i + 1] = 22 + Math.round(q * 130);
+        img.data[i + 2] = 26 + Math.round((1 - q) * 80);
+      }
       img.data[i + 3] = 255;
     }
   }
@@ -3526,11 +3854,16 @@ function renderModel() {
   ctx.drawImage(off, plot.x, plot.y, plot.w, plot.h);
   drawModelHorizons(ctx, rect, result);
   drawModelObjects(ctx, rect, result);
+  drawDraftPolygon(ctx, rect, result);
   ctx.restore();
   drawModelAxes(ctx, rect, result);
+  renderLayerMaterialEditor();
   renderModelList();
   const status = $("#model-status");
-  if (status) status.textContent = `${result.nx} traces x ${result.nz} depth cells · ${result.objects.length} objects · ${result.horizons.length} horizons`;
+  if (status) {
+    const source = model.sourceMode === "manual-snapshot" ? `manual snapshot ${model.manualSnapshot?.transferredAt ? new Date(model.manualSnapshot.transferredAt).toLocaleString("zh-CN") : ""}` : "empty model";
+    status.textContent = `${source} · ${result.nx} traces x ${result.nz} depth cells · ${result.objects.length} objects · ${result.horizons.length} horizons`;
+  }
 };
 
 function drawModelAxes(ctx, rect, result) {
@@ -3582,11 +3915,31 @@ function drawModelObjects(ctx, rect, result) {
   }
 }
 
+function drawDraftPolygon(ctx, rect, result) {
+  if (modelTool !== "polygon" || modelDraftPolygon.length === 0) return;
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,.82)";
+  ctx.fillStyle = canvasTheme.gold || "#c9a96e";
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  modelDraftPolygon.forEach((pt, i) => {
+    const p = modelWorldToCanvas(pt.xM, pt.zM, rect, result);
+    i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+  for (const pt of modelDraftPolygon) {
+    const p = modelWorldToCanvas(pt.xM, pt.zM, rect, result);
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
 function renderModelList() {
   const list = $("#model-list");
   if (!list) return;
   if (!model.objects.length) { list.innerHTML = "No model objects."; return; }
-  list.innerHTML = model.objects.map((o, i) => `<div class="model-object-row${o.id === selectedModelObjectId ? " active" : ""}"><button data-model-select-index="${i}">${i + 1}. ${escapeHtml(o.type)} epsr=${axisNumber(o.epsr)}</button><button data-model-delete-index="${i}">Del</button></div>`).join("");
+  list.innerHTML = model.objects.map((o, i) => `<div class="model-object-row${o.id === selectedModelObjectId ? " active" : ""}"><button data-model-select-index="${i}">${i + 1}. ${escapeHtml(o.name || o.type)} #${escapeHtml(String(o.id || "").slice(-5))} εr=${materialNumber(o.epsr)}</button><button data-model-delete-index="${i}">Del</button></div>`).join("");
   $$("[data-model-select-index]").forEach(btn => btn.onclick = () => {
     const object = model.objects[Number(btn.dataset.modelSelectIndex)];
     selectedModelObjectId = object?.id || "";
@@ -3610,7 +3963,7 @@ function syncModelObjectForm() {
   const object = model.objects.find(o => o.id === selectedModelObjectId) || null;
   for (const id of ["model-object-type","model-object-x","model-object-z","model-object-width","model-object-height","model-object-radius","model-object-epsr","model-object-sigma","model-object-mu"]) { const el = $(`#${id}`); if (el) el.disabled = !object; }
   if (!object) return;
-  $("#model-object-type").value = object.type; $("#model-object-x").value = axisNumber(object.xM); $("#model-object-z").value = axisNumber(object.zM); $("#model-object-width").value = axisNumber(object.widthM); $("#model-object-height").value = axisNumber(object.heightM); $("#model-object-radius").value = axisNumber(object.radiusM); $("#model-object-epsr").value = axisNumber(object.epsr); $("#model-object-sigma").value = axisNumber(object.sigma); $("#model-object-mu").value = axisNumber(object.mu);
+  $("#model-object-type").value = object.type; $("#model-object-x").value = axisNumber(object.xM); $("#model-object-z").value = axisNumber(object.zM); $("#model-object-width").value = axisNumber(object.widthM); $("#model-object-height").value = axisNumber(object.heightM); $("#model-object-radius").value = axisNumber(object.radiusM); $("#model-object-epsr").value = materialNumber(object.epsr); $("#model-object-sigma").value = materialNumber(object.sigma); $("#model-object-mu").value = materialNumber(object.mu);
 }
 
 function updateSelectedModelObject() {
@@ -3623,23 +3976,127 @@ function updateSelectedModelObject() {
 
 function addModelObject(type, world) {
   const preset = type === "pipe" ? MATERIAL_PRESETS.find(m => m.id === "pipe") : MATERIAL_PRESETS.find(m => m.id === "rock");
-  const object = normalizeObject({ id: `O${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`, type, xM: world.xM, zM: world.zM, widthM: type === "rectangle" ? 0.8 : 0.5, heightM: type === "rectangle" ? 0.45 : 0.5, radiusM: type === "pipe" ? 0.18 : 0.25, materialId: preset?.id, ...(preset || {}) });
+  const object = normalizeObject({
+    id: `O${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`,
+    type,
+    xM: world.xM,
+    zM: world.zM,
+    widthM: type === "rectangle" ? modelToolDefaults.rectangleWidthM : 0.5,
+    heightM: type === "rectangle" ? modelToolDefaults.rectangleHeightM : 0.5,
+    radiusM: type === "pipe" ? modelToolDefaults.pipeRadiusM : modelToolDefaults.circleRadiusM,
+    materialId: preset?.id,
+    ...(preset || {})
+  });
   model.objects.push(object); selectedModelObjectId = object.id; markModel2dDirty(); renderModel(); syncModelObjectForm();
 }
 
-function hitModelObject(world) {
+function hitModelObjects(world) {
+  const hits = [];
   for (let i = model.objects.length - 1; i >= 0; i--) {
-    const o = normalizeObject(model.objects[i]), dx = Math.abs(world.xM - o.xM), dz = Math.abs(world.zM - o.zM), r = o.type === "circle" || o.type === "pipe" ? o.radiusM : Math.max(o.widthM, o.heightM) / 2;
-    if (dx <= r && dz <= r) return model.objects[i];
+    if (modelObjectContains(world, normalizeObject(model.objects[i]))) hits.push(model.objects[i]);
   }
-  return null;
+  return hits;
+}
+
+function hitModelObject(world) {
+  const hits = hitModelObjects(world);
+  if (!hits.length) return null;
+  const ids = hits.map(o => o.id);
+  const key = `${ids.join("|")}:${Math.round(world.xM * 20)}:${Math.round(world.zM * 20)}`;
+  if (key === modelHitCycle.key) modelHitCycle.index = (modelHitCycle.index + 1) % hits.length;
+  else modelHitCycle = { key, ids, index: 0 };
+  return hits[modelHitCycle.index] || hits[0];
+}
+
+function modelObjectContains(world, object) {
+  const o = object;
+  if (o.type === "circle" || o.type === "pipe") return (world.xM - o.xM) ** 2 + (world.zM - o.zM) ** 2 <= o.radiusM ** 2;
+  if (o.type === "polygon" && o.points.length >= 3) return pointInWorldPolygon(world, o.points);
+  if (o.type === "ellipse") return ((world.xM - o.xM) / (o.widthM / 2)) ** 2 + ((world.zM - o.zM) / (o.heightM / 2)) ** 2 <= 1;
+  return Math.abs(world.xM - o.xM) <= o.widthM / 2 && Math.abs(world.zM - o.zM) <= o.heightM / 2;
+}
+
+function pointInWorldPolygon(point, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const pi = points[i], pj = points[j];
+    if (((pi.zM > point.zM) !== (pj.zM > point.zM)) && point.xM < (pj.xM - pi.xM) * (point.zM - pi.zM) / ((pj.zM - pi.zM) || 1e-12) + pi.xM) inside = !inside;
+  }
+  return inside;
+}
+
+function polygonCenter(points = []) {
+  if (!points.length) return { xM: 0, zM: 0 };
+  return {
+    xM: points.reduce((sum, p) => sum + p.xM, 0) / points.length,
+    zM: points.reduce((sum, p) => sum + p.zM, 0) / points.length
+  };
+}
+
+function resizeModelObject(object, factor) {
+  if (!object) return;
+  const f = Math.max(0.2, Math.min(5, factor));
+  if (object.type === "circle" || object.type === "pipe") object.radiusM = Math.max(0.01, object.radiusM * f);
+  else if (object.type === "polygon" && object.points?.length) {
+    const c = polygonCenter(object.points);
+    object.points = object.points.map(p => ({ xM: c.xM + (p.xM - c.xM) * f, zM: c.zM + (p.zM - c.zM) * f }));
+    object.xM = c.xM; object.zM = c.zM;
+  } else {
+    object.widthM = Math.max(0.01, object.widthM * f);
+    object.heightM = Math.max(0.01, object.heightM * f);
+  }
+}
+
+function adjustModelToolDefault(factor) {
+  if (modelTool === "pipe") modelToolDefaults.pipeRadiusM = Math.max(0.01, modelToolDefaults.pipeRadiusM * factor);
+  else if (modelTool === "rectangle") {
+    modelToolDefaults.rectangleWidthM = Math.max(0.02, modelToolDefaults.rectangleWidthM * factor);
+    modelToolDefaults.rectangleHeightM = Math.max(0.02, modelToolDefaults.rectangleHeightM * factor);
+  } else modelToolDefaults.circleRadiusM = Math.max(0.01, modelToolDefaults.circleRadiusM * factor);
+}
+
+function modelCursor(tool) {
+  const cursorSvg = shape => `url("data:image/svg+xml;utf8,${shape}") 12 12, crosshair`;
+  if (tool === "circle") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='8' fill='none' stroke='%23ffffff' stroke-width='2'/><path d='M12 3v18M3 12h18' stroke='%23c9a96e' stroke-width='1'/></svg>");
+  if (tool === "rectangle") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><rect x='5' y='7' width='14' height='10' fill='none' stroke='%23ffffff' stroke-width='2'/><path d='M12 3v18M3 12h18' stroke='%23c9a96e' stroke-width='1'/></svg>");
+  if (tool === "pipe") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='8' fill='none' stroke='%23ffffff' stroke-width='2'/><circle cx='12' cy='12' r='4' fill='none' stroke='%23c9a96e' stroke-width='2'/></svg>");
+  if (tool === "polygon") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='3' fill='%23ffffff'/><path d='M12 4v4M12 16v4M4 12h4M16 12h4' stroke='%23c9a96e' stroke-width='1.5'/></svg>");
+  return "default";
+}
+
+function updateModelCursor() {
+  const cv = $("#model-canvas");
+  if (cv) cv.style.cursor = modelCursor(modelTool);
 }
 
 bindModel = function bindModelV2() {
   const cv = $("#model-canvas");
   if (!cv) return;
-  let polygon = [];
+  updateModelCursor();
+  cv.addEventListener("contextmenu", e => {
+    if (modelTool !== "polygon") return;
+    e.preventDefault();
+    if (modelDraftPolygon.length < 3) { toast("多边形至少需要 3 个点", "warn"); return; }
+    const c = polygonCenter(modelDraftPolygon);
+    const object = normalizeObject({ id: `O${Date.now().toString(36)}${Math.floor(Math.random() * 999)}`, type: "polygon", points: modelDraftPolygon, xM: c.xM, zM: c.zM, epsr: 12, sigma: 0.001, mu: 1 });
+    model.objects.push(object); selectedModelObjectId = object.id; modelDraftPolygon = []; markModel2dDirty(); renderModel(); syncModelObjectForm();
+  });
+  cv.addEventListener("wheel", e => {
+    if (!["circle", "rectangle", "pipe", "polygon", "select"].includes(modelTool)) return;
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.08 : 0.92;
+    const object = model.objects.find(o => o.id === selectedModelObjectId);
+    if (object) {
+      resizeModelObject(object, factor);
+      markModel2dDirty();
+      renderModel(); syncModelObjectForm();
+    } else if (modelTool !== "select") {
+      adjustModelToolDefault(factor);
+      toast("默认异常体尺寸已调整");
+    }
+  }, { passive: false });
   cv.addEventListener("mousedown", e => {
+    if (e.button === 2) return;
     const rect = cv.getBoundingClientRect(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect);
     if (modelTool === "select") {
       const hit = hitModelObject(world);
@@ -3648,8 +4105,7 @@ bindModel = function bindModelV2() {
       return;
     }
     if (modelTool === "polygon") {
-      polygon.push(world);
-      if (polygon.length >= 3 && e.detail >= 2) { const object = normalizeObject({ type: "polygon", points: polygon, xM: polygon[0].xM, zM: polygon[0].zM, epsr: 12, sigma: 0.001, mu: 1 }); model.objects.push(object); selectedModelObjectId = object.id; polygon = []; markModel2dDirty(); }
+      modelDraftPolygon.push(world);
       renderModel(); return;
     }
     addModelObject(modelTool === "circle" ? "circle" : modelTool === "pipe" ? "pipe" : "rectangle", world);
@@ -3665,6 +4121,13 @@ bindModel = function bindModelV2() {
     renderModel(); syncModelObjectForm();
   });
   addEventListener("mouseup", () => { modelDrag = null; });
+  addEventListener("keydown", e => {
+    if (e.key === "Escape" && modelDraftPolygon.length) {
+      modelDraftPolygon = [];
+      renderModel();
+      toast("已取消多边形绘制");
+    }
+  });
 };
 
 async function buildModel2dOutput() {
@@ -3694,6 +4157,7 @@ async function buildModel2dOutput() {
     displaySource = "current"; $("#display-mode").value = "current";
   }
   refresh(); renderModel(); toast("2-D electromagnetic model generated.");
+  downloadMatWithPrompt(variablesFromModelGrid(result, { workflow: "manual-snapshot", ...params }), "manual_2d_model.mat");
 }
 
 forwardModel = async function forwardModelV2(mode = "tm") {
@@ -3726,6 +4190,7 @@ forwardModel = async function forwardModelV2(mode = "tm") {
     store.setOutput({ ...fdtdForwardResult, name: `${mode}_fdtd_forward` }, { name: `${mode.toUpperCase()} FDTD Forward`, op: `fdtd-${mode}2d`, params: fdtd });
     displaySource = "output"; $("#display-mode").value = "output"; refresh();
     $("#footer-status").textContent = `${mode.toUpperCase()} FDTD completed`;
+    downloadMatWithPrompt(variablesFromForwardResult(fdtdForwardResult, model2dResult || rebuildModel2d(), { workflow: "manual-snapshot", mode, ...fdtd }), `manual_${mode}_fdtd.mat`);
     toast(`${mode.toUpperCase()} FDTD forward result generated.`);
   } catch (error) {
     $("#footer-status").textContent = "FDTD failed";
@@ -3736,8 +4201,7 @@ forwardModel = async function forwardModelV2(mode = "tm") {
 function exportModelMat() {
   const result = fdtdForwardResult || store.output;
   if (!result?.data?.length) return toast("Run FDTD before exporting MAT.", "warn");
-  const mat = writeMatFile(variablesFromForwardResult(result, model2dResult || rebuildModel2d(), currentModelOptions()));
-  download(new Blob([mat], { type: "application/octet-stream" }), "lpr_fdtd_forward.mat");
+  downloadMatWithPrompt(variablesFromForwardResult(result, model2dResult || rebuildModel2d(), currentModelOptions()), "lpr_fdtd_forward.mat");
 }
 
 function exportModelPng() {

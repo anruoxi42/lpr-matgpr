@@ -1,5 +1,5 @@
 import * as A from "../processing/algorithms.js";
-import { manualHorizonsToModel, prepareFdtdGridFromModel } from "../modeling/model2d.js";
+import { buildFixedModelFromDielectric, generateLayeredDielectric, manualHorizonsToModel, prepareFdtdGridFromModel } from "../modeling/model2d.js";
 import { simulateTm2d } from "../modeling/fdtd/tm2d.js";
 import { simulateTe2d } from "../modeling/fdtd/te2d.js";
 
@@ -130,6 +130,53 @@ self.onmessage = ({ data }) => {
         dxM: model.distanceStepM,
         model2d: model,
         name: "model2d_epsr"
+      };
+    }
+    else if (op === "p5-random-model") {
+      const layered = generateLayeredDielectric(params);
+      const intDis = Number(params.IntDis ?? params.distanceStepM ?? params.dxM ?? 0.02);
+      r = {
+        data: layered.ep,
+        ep: layered.ep,
+        numTraces: layered.nx,
+        numSamples: layered.nz,
+        verticalAxisKind: "depth",
+        depthAxisM: buildAxis(layered.nz, intDis),
+        depthStep: intDis,
+        dxM: intDis,
+        distanceAxisM: buildAxis(layered.nx, intDis),
+        boundaries: layered.boundaries,
+        boundaryOptions: layered.boundaryOptions,
+        layerValues: layered.layerValues,
+        objects: layered.objects,
+        name: "p5_1_dielectric"
+      };
+    }
+    else if (op === "p5-conductivity-model") {
+      const nxModel = Math.max(1, Math.floor(Number(params.nx || params.cols || params.numTraces || 0)));
+      const nzModel = Math.max(1, Math.floor(Number(params.nz || params.rows || params.numSamples || 0)));
+      const ep = params.ep || params.data || [];
+      if (!ep?.length || ep.length !== nxModel * nzModel) throw new Error("p5 conductivity conversion requires an ep grid.");
+      const intDis = Number(params.IntDis ?? params.distanceStepM ?? params.dxM ?? 0.02);
+      const airRows = Math.max(0, Math.floor(Number(params.airRows ?? params.lTHK ?? 30)));
+      const model = buildFixedModelFromDielectric(Float32Array.from(ep), {
+        nx: nxModel,
+        nz: nzModel,
+        IntDis: intDis,
+        depthOffsetM: -airRows * intDis,
+        frequencyHz: params.frequencyHz ?? params.startFrequencyHz ?? 500e6,
+        conductivityDtNs: params.conductivityDtNs ?? params.dtNsForConductivity ?? 0.3125
+      });
+      r = {
+        data: model.epsrField,
+        numTraces: model.nx,
+        numSamples: model.nz,
+        verticalAxisKind: "depth",
+        depthAxisM: model.depthAxisM,
+        depthStep: model.depthStepM,
+        dxM: model.distanceStepM,
+        model2d: model,
+        name: "p5_2_Model"
       };
     }
     else if (op === "fdtd-tm2d" || op === "fdtd-te2d") {
