@@ -1,5 +1,7 @@
 import { buildAxis, depthMajorToXMajor, gridInterp, padGrid } from "./fdtd/grid.js";
-import { MATERIAL_PRESETS, materialFromEpsr, normalizeMaterial } from "./materials.js";
+import { MATERIAL_PRESETS, calDensity, calLossTangent, normalizeMaterial } from "./materials.js";
+
+const MATLAB_EPS0 = 8.854e-12;
 
 export const DEFAULT_MODEL_MATERIALS = [
   { id: "layer0", name: "Layer 1", epsr: 9, sigma: 0.0005, mu: 1 },
@@ -14,7 +16,8 @@ export function createEmptyModel(options = {}) {
   const nz = Math.max(2, Math.floor(Number(options.depthSamples || options.nz || 240)));
   const dx = positive(options.distanceStepM ?? options.dxM, 0.05);
   const depthMax = positive(options.depthMaxM, 6);
-  const dz = depthMax / Math.max(1, nz - 1);
+  const depthOffset = finiteNumber(options.depthOffsetM ?? options.zOffsetM, 0);
+  const dz = Math.max(Number.EPSILON, (depthMax - depthOffset) / Math.max(1, nz - 1));
   const background = normalizeMaterial(options.background || DEFAULT_MODEL_MATERIALS[0]);
   const epsrField = new Float32Array(nx * nz);
   const sigmaField = new Float32Array(nx * nz);
@@ -27,10 +30,11 @@ export function createEmptyModel(options = {}) {
     nx,
     nz,
     distanceAxisM: buildAxis(nx, dx),
-    depthAxisM: buildAxis(nz, dz),
+    depthAxisM: buildAxis(nz, dz, depthOffset),
     distanceStepM: dx,
     depthStepM: dz,
     depthMaxM: depthMax,
+    depthOffsetM: depthOffset,
     materials: [background],
     horizons: [],
     objects: [],
@@ -45,13 +49,20 @@ export function manualHorizonsToModel(horizons = [], options = {}) {
   const nz = Math.max(2, Math.floor(Number(options.depthSamples || options.nz || options.modelSamples || 240)));
   const distanceStepM = positive(options.distanceStepM ?? options.dxM, 0.05);
   const depthMaxM = positive(options.depthMaxM || options.modelDepthMax, inferDepthMax(horizons, 6));
-  const model = createEmptyModel({ nx, nz, distanceStepM, depthMaxM, background: DEFAULT_MODEL_MATERIALS[0] });
+  const model = createEmptyModel({ nx, nz, distanceStepM, depthMaxM, depthOffsetM: options.depthOffsetM, background: DEFAULT_MODEL_MATERIALS[0] });
   const materials = normalizeLayerMaterials(options.layerMaterials, horizons.length + 1);
   model.materials = materials;
   model.horizons = horizons.map((h, i) => ({ ...h, index: i, line: Float32Array.from(h.line || []) }));
   for (let iz = 0; iz < nz; iz++) {
     const depth = model.depthAxisM[iz];
     for (let ix = 0; ix < nx; ix++) {
+      if (depth < 0) {
+        const idx = iz * nx + ix;
+        model.epsrField[idx] = 1;
+        model.sigmaField[idx] = 0;
+        model.muField[idx] = 1;
+        continue;
+      }
       const layerIndex = layerAt(model.horizons, ix, depth);
       const mat = materials[Math.min(layerIndex, materials.length - 1)];
       const idx = iz * nx + ix;
@@ -64,6 +75,7 @@ export function manualHorizonsToModel(horizons = [], options = {}) {
     model.objects = options.objects.map(normalizeObject);
     applyObjectsToModel(model);
   }
+  if (options.conductivityMode === "p5") applyP5ConductivityToModel(model, options);
   return model;
 }
 
@@ -79,8 +91,7 @@ export function buildFixedModelFromDielectric(epsrField, options = {}) {
   const sigma = new Float32Array(nx * nz);
   const mu = new Float32Array(nx * nz);
   mu.fill(1);
-  for (let i = 0; i < epsrField.length; i++) sigma[i] = materialFromEpsr(epsrField[i]).sigma;
-  return {
+  const model = {
     kind: "lpr-model2d",
     nx,
     nz,
@@ -96,6 +107,37 @@ export function buildFixedModelFromDielectric(epsrField, options = {}) {
     sigmaField: sigma,
     muField: mu
   };
+  applyP5ConductivityToModel(model, options);
+  return model;
+}
+
+export function applyP5ConductivityToModel(model, options = {}) {
+  const nx = Math.max(1, Math.floor(Number(model.nx || 0)));
+  const nz = Math.max(1, Math.floor(Number(model.nz || 0)));
+  const frequencyStartHz = positive(options.frequencyHz ?? options.startFrequencyHz, 500e6);
+  const dtNs = positive(options.conductivityDtNs ?? options.dtNsForConductivity, 0.3125);
+  if (!model.sigmaField || model.sigmaField.length !== nx * nz) model.sigmaField = new Float32Array(nx * nz);
+  if (!model.muField || model.muField.length !== nx * nz) model.muField = new Float32Array(nx * nz);
+  for (let ix = 0; ix < nx; ix++) {
+    let frequencyHz = frequencyStartHz;
+    for (let iz = 0; iz < nz; iz++) {
+      const idx = iz * nx + ix;
+      model.muField[idx] = 1;
+      const depth = Number(model.depthAxisM?.[iz] ?? iz * (model.depthStepM || 1));
+      if (depth < 0) {
+        model.sigmaField[idx] = 0;
+        continue;
+      }
+      const epsr = Math.max(Number(model.epsrField?.[idx]) || 1, Number.EPSILON);
+      const density = calDensity(epsr);
+      const lossTangent = calLossTangent(density);
+      model.sigmaField[idx] = 2 * Math.PI * frequencyHz * MATLAB_EPS0 * epsr * lossTangent;
+      frequencyHz -= lossTangent * Math.PI * frequencyHz * frequencyHz / 8 * 1e-9 * dtNs;
+      if (!(frequencyHz > 0) || !Number.isFinite(frequencyHz)) frequencyHz = frequencyStartHz;
+    }
+  }
+  model.conductivityMode = "p5";
+  return model;
 }
 
 export function generateLayeredDielectric(options = {}) {

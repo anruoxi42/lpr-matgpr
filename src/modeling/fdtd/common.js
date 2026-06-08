@@ -29,9 +29,10 @@ export function normalizeFdtdInput(input = {}, options = {}) {
   const dx = Math.abs(x[1] - x[0]) || Number(options.dxM) || 0.02;
   const dz = Math.abs(z[1] - z[0]) || Number(options.dzM) || dx;
   const dt = Number(options.dtS ?? options.dt ?? stableDt(ep, muGrid, dx, dz));
-  const samples = Math.max(2, Math.floor(Number(options.samples || options.numSamples || input.srcpulse?.length || 640)));
-  const srcpulse = Float64Array.from(input.srcpulse || createRickerPulse(options.frequencyHz || 500e6, dt, samples));
-  const t = input.t ? Float64Array.from(input.t) : buildAxis(srcpulse.length, dt);
+  const sourceInput = input.srcpulse || options.srcpulse;
+  const samples = Math.max(2, Math.floor(Number(options.iterations || sourceInput?.length || options.samples || options.numSamples || 640)));
+  const srcpulse = Float64Array.from(sourceInput || createRickerPulse(options.frequencyHz || 500e6, dt, samples));
+  const t = input.t || options.t ? Float64Array.from(input.t || options.t) : buildAxis(srcpulse.length, dt);
   const outstep = Math.max(1, Math.round(Number(options.outstep || 1)));
   const npml = Math.max(0, Math.round(Number(options.npml ?? 10)));
   return {

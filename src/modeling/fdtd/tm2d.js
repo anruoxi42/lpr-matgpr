@@ -172,9 +172,10 @@ function normalizeCpmlInput(input, options) {
   const nzField = (nzProp + 1) >> 1;
 
   const dt = finitePositive(options.dtS ?? options.dt, stableDt(ep, mu, dx, dz));
-  const samples = Math.max(2, Math.floor(Number(options.samples || input.srcpulse?.length || 640)));
-  const srcpulse = Float64Array.from(input.srcpulse || createRickerPulse(options.frequencyHz || 500e6, dt, samples));
-  const t = input.t ? Float64Array.from(input.t) : buildAxis(srcpulse.length, dt);
+  const sourceInput = input.srcpulse || options.srcpulse;
+  const samples = Math.max(2, Math.floor(Number(options.iterations || sourceInput?.length || options.samples || 640)));
+  const srcpulse = Float64Array.from(sourceInput || createRickerPulse(options.frequencyHz || 500e6, dt, samples));
+  const t = input.t || options.t ? Float64Array.from(input.t || options.t) : buildAxis(srcpulse.length, dt);
 
   return {
     nxProp, nzProp, nxField, nzField, npml,

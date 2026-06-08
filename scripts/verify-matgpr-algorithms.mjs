@@ -24,7 +24,7 @@ import {
 import { HCD_DEFAULT_DT_NS, parseHadText, parseHcdFile } from "../src/io/hcd.js";
 import { parse2BFile } from "../src/io/twoB.js";
 import { localMaxima, pickPeaksNearPoint, traceFromSeed } from "../src/processing/peakTracking.js";
-import { generateLayeredDielectric, manualHorizonsToModel, modelToFdtdGrid, prepareFdtdGridFromModel } from "../src/modeling/model2d.js";
+import { buildFixedModelFromDielectric, generateLayeredDielectric, manualHorizonsToModel, modelToFdtdGrid, prepareFdtdGridFromModel } from "../src/modeling/model2d.js";
 import { calConductivity, calDensity, calLossTangent } from "../src/modeling/materials.js";
 import { estimateGridSpacing, gridInterp, padGrid } from "../src/modeling/fdtd/grid.js";
 import { simulateTm2d } from "../src/modeling/fdtd/tm2d.js";
@@ -32,6 +32,7 @@ import { simulateTe2d } from "../src/modeling/fdtd/te2d.js";
 import { variablesFromForwardResult, writeMatFile } from "../src/io/mat.js";
 import { parseMatFileAsync } from "../src/io/mat-reader.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -265,6 +266,14 @@ assert(model2d.epsrField.length === 20 * 30 && Math.max(...model2d.epsrField) >=
 
 const layered = generateLayeredDielectric({ size: 48, seed: 7, randomRocks: true });
 assert(layered.ep.length === 48 * 48 && layered.boundaries.length === 4, "layered dielectric generation failed");
+const fixedP5 = buildFixedModelFromDielectric(Float32Array.from({ length: 8 * 8 }, (_, i) => i < 16 ? 1 : 4), {
+  nx: 8,
+  nz: 8,
+  IntDis: 0.02,
+  depthOffsetM: -0.04
+});
+assert(Math.abs(fixedP5.depthAxisM[0] + 0.04) < 1e-9 && Math.abs(fixedP5.distanceStepM - 0.02) < 1e-9, "p5 fixed model axes are wrong");
+assert(fixedP5.sigmaField[0] === 0 && fixedP5.sigmaField[2 * fixedP5.nx] > 0, "p5 conductivity generation failed");
 
 const interp = gridInterp(Float32Array.from([1, 2, 3, 4]), [0, 1], [0, 1], [0, 0.5, 1], [0, 0.5, 1], "linear");
 assert(interp.length === 9 && Math.abs(interp[4] - 2.5) < 1e-6, "grid interpolation failed");
@@ -284,9 +293,13 @@ assert(evenGridRejected, "TM FDTD should reject even property-grid dimensions");
 const fdtdGrid = prepareFdtdGridFromModel(fdtdModel, { npml: 3, receiverOffsetM: 0.05, airThicknessM: 0.2, antennaZ: -0.1 });
 const tm = simulateTm2d(fdtdGrid, { traceCount: 3, samples: 24, frequencyHz: 300e6, npml: 3, receiverOffsetM: 0.05 });
 const te = simulateTe2d(fdtdGrid, { traceCount: 3, samples: 20, frequencyHz: 300e6, npml: 3, receiverOffsetM: 0.05 });
+const p5LikePulse = Float32Array.from({ length: 40 }, (_, i) => Math.sin(i / 4) * Math.exp(-i / 30));
+const p5LikeTm = simulateTm2d(fdtdGrid, { traceCount: 2, samples: 10, iterations: 40, srcpulse: p5LikePulse, outstep: 4, dtS: 0.3125e-9 / 10, frequencyHz: 300e6, npml: 3, receiverOffsetM: 0.05 });
 finite(tm.data, "TM FDTD");
 finite(te.data, "TE FDTD");
+finite(p5LikeTm.data, "p5-like TM FDTD");
 assert(tm.numTraces === 3 && tm.numSamples === 24 && te.numTraces === 3, "FDTD dimensions failed");
+assert(p5LikeTm.numTraces === 2 && p5LikeTm.numSamples === 10, "p5-like FDTD outstep dimensions failed");
 assert(rms(tm.data) > 0 && rms(te.data) > 0, "FDTD output is empty");
 
 const mat = writeMatFile(variablesFromForwardResult(tm, fdtdModel, { test: true }));
@@ -314,6 +327,22 @@ if (existsSync(hdf5PulsePath)) {
 }
 
 const discoveredTrackingMatPath = findFileByName(softwareRoot, "data_correct.mat");
+const discoveredHdf5PulsePath = findFileByName(softwareRoot, "P2_pulse_new.mat");
+if (discoveredHdf5PulsePath) {
+  const vars = readHdf5MatFixture(discoveredHdf5PulsePath);
+  assert(vars.srcpulse?.rows === 1 && vars.srcpulse?.cols === 20480, "MATLAB 7.3 srcpulse dimensions were not restored");
+  assert(vars.srcpulse.data.length === 20480, "MATLAB 7.3 srcpulse payload length is wrong");
+}
+const discoveredHdf5EchoPath = findFileByName(softwareRoot, "p5_4_echo_simu.mat");
+if (discoveredHdf5EchoPath) {
+  const vars = readHdf5MatFixture(discoveredHdf5EchoPath);
+  assert(vars.echo_simu?.rows === 640 && vars.echo_simu?.cols === 901, "MATLAB 7.3 echo_simu dimensions were not restored");
+}
+const discoveredHdf5RadarPath = findFileByName(softwareRoot, "p5_3_radar_gram_50_2_950.mat");
+if (discoveredHdf5RadarPath) {
+  const vars = readHdf5MatFixture(discoveredHdf5RadarPath);
+  assert(vars.radar_gram?.rows === 640 && vars.radar_gram?.cols === 451, "MATLAB 7.3 radar_gram dimensions were not restored");
+}
 if (discoveredTrackingMatPath) {
   const vars = await parseMatFileAsync(arrayBufferFromNodeBuffer(readFileSync(discoveredTrackingMatPath)));
   assert(vars.data?.type === "int16" && vars.data.rows === 486 && vars.data.cols === 2563, "int16 MATLAB radar matrix was not parsed with correct dimensions");
@@ -328,6 +357,25 @@ if (existsSync(sampleTwoBPath)) {
 
 function arrayBufferFromNodeBuffer(buffer) {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
+function readHdf5MatFixture(path) {
+  const result = spawnSync("python", [join(root, "scripts", "read-hdf5-mat.py"), path], {
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout || `h5py reader exited with ${result.status}`);
+  const payload = JSON.parse(result.stdout);
+  const variables = payload.variables || {};
+  for (const value of Object.values(variables)) {
+    const encoded = value.data;
+    if (encoded?.encoding !== "base64" || encoded?.dtype !== "float32") continue;
+    const bytes = Buffer.from(encoded.value || "", "base64");
+    value.data = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+  }
+  return variables;
 }
 
 function findFileByName(rootDir, fileName, maxDepth = 4) {

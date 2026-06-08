@@ -33,6 +33,7 @@ export function variablesFromForwardResult(result = {}, model = null, params = {
     vars.ep = { data: depthMajorToMat(model.epsrField || new Float32Array(), model.nx || 0, model.nz || 0), dims: [model.nz || 0, model.nx || 0], type: "single" };
     vars.mu = { data: depthMajorToMat(model.muField || new Float32Array(), model.nx || 0, model.nz || 0), dims: [model.nz || 0, model.nx || 0], type: "single" };
     vars.sig = { data: depthMajorToMat(model.sigmaField || new Float32Array(), model.nx || 0, model.nz || 0), dims: [model.nz || 0, model.nx || 0], type: "single" };
+    vars.cd = { data: depthMajorToMat(model.sigmaField || new Float32Array(), model.nx || 0, model.nz || 0), dims: [model.nz || 0, model.nx || 0], type: "single" };
     vars.x = { data: Float32Array.from(model.distanceAxisM || []), dims: [1, model.nx || 0], type: "single" };
     vars.z = { data: Float32Array.from(model.depthAxisM || []), dims: [model.nz || 0, 1], type: "single" };
   }

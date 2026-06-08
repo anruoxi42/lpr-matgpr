@@ -24,6 +24,8 @@ let fdtdForwardResult = null;
 let selectedModelObjectId = "";
 let modelDrag = null;
 let modelTool = "select";
+let fdtdSrcPulse = null;
+let fdtdP5Preset = false;
 let radarSelections = [];
 let radarAnnotations = [];
 let lastMergedSelection = null;
@@ -597,14 +599,87 @@ function isMatlabTrackingMatrix(name, value, matrix) {
     && matrix?.numTraces === 2563;
 }
 
+function isMatHdf5Error(error) {
+  return /MATLAB 7\.3|HDF5/i.test(error?.message || String(error || ""));
+}
+
+async function parseMatVariablesForImport(file, buf) {
+  if (fileExt(file.name) === ".h5") return parseHdf5MatFile(file);
+  try {
+    return await parseMatFileAsync(buf);
+  } catch (error) {
+    if (isMatHdf5Error(error)) return parseHdf5MatFile(file);
+    throw error;
+  }
+}
+
+async function parseHdf5MatFile(file) {
+  let response;
+  try {
+    response = await fetch(`/api/mat-hdf5?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+  } catch (error) {
+    throw new Error(`MATLAB 7.3/HDF5 导入需要通过本地服务器运行（npm run dev 或 npm run preview）。${error.message || error}`);
+  }
+  let payload = null;
+  try { payload = await response.json(); } catch {}
+  if (!response.ok) {
+    const message = payload?.error || `HTTP ${response.status}`;
+    throw new Error(`MATLAB 7.3/HDF5 导入失败：${message}`);
+  }
+  return decodeHdf5Variables(payload?.variables || {});
+}
+
+function decodeHdf5Variables(variables) {
+  const out = {};
+  for (const [name, value] of Object.entries(variables || {})) {
+    const encoded = value?.data;
+    if (encoded?.encoding !== "base64" || encoded?.dtype !== "float32") continue;
+    out[name] = { ...value, data: base64ToFloat32Array(encoded.value, encoded.length), type: value.type || "single" };
+  }
+  return out;
+}
+
+function base64ToFloat32Array(text, expectedLength = 0) {
+  const raw = atob(String(text || ""));
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const arr = new Float32Array(bytes.buffer);
+  return expectedLength && arr.length !== expectedLength ? arr.slice(0, expectedLength) : arr;
+}
+
+function isMatNumericVector(value) {
+  return isMatNumericMatrix(value) && (Number(value.rows) === 1 || Number(value.cols) === 1);
+}
+
+function cacheSrcPulseFromVars(vars, file) {
+  const entry = Object.entries(vars || {}).find(([name, value]) => /^srcpulse$/i.test(name) && isMatNumericVector(value));
+  if (!entry) return false;
+  const values = matArrayValues(entry[1]);
+  if (!values?.length) return false;
+  fdtdSrcPulse = {
+    name: file.name,
+    variableName: entry[0],
+    data: Float32Array.from(values, Number),
+    loadedAt: new Date().toLocaleString("zh-CN")
+  };
+  $("#footer-status").textContent = `${file.name} source pulse loaded (${fdtdSrcPulse.data.length} samples)`;
+  toast(`${file.name}: srcpulse 已加载（${fdtdSrcPulse.data.length} 点）`);
+  return true;
+}
+
 readMatImport = async function readMatImportV2(file) {
   $("#footer-status").textContent = "姝ｅ湪瑙ｆ瀽 " + file.name;
   const buf = await file.arrayBuffer();
-  const variables = await parseMatFileAsync(buf);
+  const variables = await parseMatVariablesForImport(file, buf);
   const candidates = Object.entries(variables).filter(([, v]) => isMatNumericMatrix(v));
   if (!candidates.length) throw new Error("MAT file does not contain a supported 2-D numeric matrix.");
-  candidates.sort((a, b) => matMatrixScore(b[0], b[1]) - matMatrixScore(a[0], a[1]));
-  const [variableName, variable] = candidates[0];
+  const displayCandidates = candidates.filter(([name, v]) => !/^srcpulse$/i.test(name) && Number(v.rows) > 1 && Number(v.cols) > 1);
+  const cachedPulse = cacheSrcPulseFromVars(variables, file);
+  if (!displayCandidates.length && cachedPulse) return;
+  const usableCandidates = displayCandidates.length ? displayCandidates : candidates.filter(([name]) => !/^srcpulse$/i.test(name));
+  if (!usableCandidates.length) throw new Error("MAT file only contains source-pulse data; it has been cached for FDTD.");
+  usableCandidates.sort((a, b) => matMatrixScore(b[0], b[1]) - matMatrixScore(a[0], a[1]));
+  const [variableName, variable] = usableCandidates[0];
   const matrix = matMatrixToTraceMajor(variable);
   const matlabDisplay = isMatlabTrackingMatrix(variableName, variable, matrix);
   const display = matlabDisplay ? { min: -100, max: 100 } : robustDisplayRange(matrix.data, 0.04, 0.96);
@@ -653,11 +728,11 @@ async function importFiles(files) {
   const groups = new Map();
   for (const file of list) {
     const ext = fileExt(file.name);
-    if (![".2b", ".hcd", ".had", ".mat"].includes(ext)) {
+    if (![".2b", ".hcd", ".had", ".mat", ".h5"].includes(ext)) {
       toast(`${file.name} 暂不支持导入`, "warn");
       continue;
     }
-    if (ext === ".mat") { try { await readMatImport(file); } catch (error) { toast(file.name + ": " + error.message, "err"); } continue; }
+    if (ext === ".mat" || ext === ".h5") { try { await readMatImport(file); } catch (error) { toast(file.name + ": " + error.message, "err"); } continue; }
     const stem = fileStem(file.name);
     const group = groups.get(stem) || {};
     if (ext === ".2b") group.twoB = file;
@@ -1612,6 +1687,7 @@ function setupCanvas(canvas, opts = {}) {
 
 function plotLayout(width, height, opts = {}) {
   if (opts.axes !== true) return { plot: { x: 0, y: 0, w: width, h: height }, axes: false, colorbar: false };
+  if (opts.fullBleed === true) return { plot: { x: 0, y: 0, w: width, h: height }, axes: true, colorbar: false, fullBleed: true };
   const colorbar = opts.colorbar === true;
   let left = opts.leftMargin ?? (width < 520 ? 58 : 68);
   let bottom = opts.bottomMargin ?? (height < 220 ? 38 : 46);
@@ -1732,6 +1808,50 @@ function drawPlotAxes(ctx, render, opts = {}) {
     ctx.textBaseline = "bottom";
     ctx.fillText(axisNumber(opts.min ?? 0), bx + bw + 5, by + bh);
   }
+  ctx.restore();
+}
+
+function drawFullBleedPlotAxes(ctx, render) {
+  const { cssW, cssH, layout, scale } = render;
+  const { plot } = layout;
+  const ticksX = plot.w < 260 ? 3 : 5;
+  const ticksY = plot.h < 180 ? 3 : 5;
+  ctx.save();
+  ctx.strokeStyle = "rgba(238,246,255,.36)";
+  ctx.fillStyle = "rgba(238,246,255,.78)";
+  ctx.lineWidth = 1;
+  ctx.font = `${plot.w < 260 ? 10 : 11}px Consolas, monospace`;
+  ctx.shadowColor = "rgba(0,0,0,.65)";
+  ctx.shadowBlur = 3;
+  ctx.strokeRect(plot.x + 0.5, plot.y + 0.5, plot.w - 1, plot.h - 1);
+  ctx.textBaseline = "top";
+  for (let i = 0; i <= ticksX; i++) {
+    const f = i / ticksX;
+    const x = plot.x + f * plot.w;
+    const trace = scale.traceStart + f * (scale.traceEnd - scale.traceStart);
+    const label = Number.isFinite(scale.distanceStep) ? `${axisNumber(trace * scale.distanceStep)}` : `T${Math.round(trace)}`;
+    ctx.beginPath(); ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.h); ctx.stroke();
+    ctx.textAlign = i === 0 ? "left" : (i === ticksX ? "right" : "center");
+    ctx.fillText(label, Math.max(4, Math.min(cssW - 4, x)), cssH - 16);
+  }
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= ticksY; i++) {
+    const f = i / ticksY;
+    const y = plot.y + f * plot.h;
+    const depth = scale.depthStart + f * (scale.depthEnd - scale.depthStart);
+    ctx.beginPath(); ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.w, y); ctx.stroke();
+    ctx.fillText(`${axisNumber(depth)}`, cssW - 4, Math.max(10, Math.min(cssH - 10, y)));
+  }
+  ctx.textAlign = "right";
+  ctx.textBaseline = "top";
+  ctx.fillText("distance (m)", cssW - 4, 5);
+  ctx.save();
+  ctx.translate(12, cssH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.fillText("depth (m)", 0, 0);
+  ctx.restore();
   ctx.restore();
 }
 
@@ -2787,10 +2907,12 @@ function paintImageLine(img, w, h, x0, y0, x1, y1, rgb, radius = 0) {
 }
 function drawLayerModelCanvas(canvas, result, opts = {}) {
   if (!canvas || !result) return;
-  const prepared = setupCanvas(canvas, { axes: true, ...opts });
+  const fullBleed = opts.fullBleed !== false;
+  const drawOpts = { axes: true, ...opts, fullBleed };
+  const prepared = setupCanvas(canvas, drawOpts);
   const traceCount = Math.max(1, result.modelTraces || result.numTraces || 1);
   const depthMax = Math.max(1e-9, Number(result.modelDepthMax || 1));
-  const layout = plotLayout(prepared.cssW, prepared.cssH, { axes: true, ...opts });
+  const layout = plotLayout(prepared.cssW, prepared.cssH, drawOpts);
   const scale = {
     traces: traceCount,
     samples: result.modelSamples || result.numSamples || 1,
@@ -2858,7 +2980,7 @@ function drawLayerModelCanvas(canvas, result, opts = {}) {
     ctx.stroke();
   }
   ctx.restore();
-  drawPlotAxes(ctx, render, { axes: true });
+  fullBleed ? drawFullBleedPlotAxes(ctx, render) : drawPlotAxes(ctx, render, { axes: true });
   return render;
 }
 function exportGeologyJson() {
@@ -3060,8 +3182,7 @@ function bindUi() {
     if (action === "save-report") download(new Blob([JSON.stringify({ velocityPoints, model }, null, 2)], {type:"application/json"}), "interpretation-report.json");
     if (e.target.dataset.close) $(`#${e.target.dataset.close}`).classList.remove("show");
     if (e.target.dataset.modelTool) {
-      modelTool = e.target.dataset.modelTool;
-      $$("[data-model-tool]").forEach(btn => btn.classList.toggle("active", btn.dataset.modelTool === modelTool));
+      setModelTool(e.target.dataset.modelTool);
       toast(`建模工具：${modelTool}`);
     }
   });
@@ -3097,6 +3218,7 @@ function bindUi() {
   };
   $("#model-export").onclick = () => download(new Blob([JSON.stringify({ ...model, model2d: model2dResult || rebuildModel2d() }, null, 2)], {type:"application/json"}), "lpr-model.json");
   $("#model-build") && ($("#model-build").onclick = buildModel2dOutput);
+  $("#model-p5-preset") && ($("#model-p5-preset").onclick = applyP5Preset);
   $("#model-fdtd-tm") && ($("#model-fdtd-tm").onclick = () => forwardModel("tm"));
   $("#model-fdtd-te") && ($("#model-fdtd-te").onclick = () => forwardModel("te"));
   $("#model-export-mat") && ($("#model-export-mat").onclick = exportModelMat);
@@ -3262,12 +3384,46 @@ function currentModelOptions() {
   const depthSamples = oddAtLeast(Number($("#model-depth-samples")?.value || 241), 9);
   const depthMaxM = finiteNumber($("#model-depth-max")?.value, manualModelResult?.modelDepthMax || rp.depthMaxM || inferredDepthMax(ds));
   const distanceStepM = finiteNumber($("#model-dx")?.value, rp.dxM || datasetDxM(ds));
+  const airThicknessM = Math.max(0, Number($("#fdtd-air")?.value || 0.6));
   const background = {
     epsr: finiteNumber($("#model-epsr")?.value, model.background.epsr),
     sigma: finiteNumber($("#model-sigma")?.value, model.background.sigma),
     mu: finiteNumber($("#model-mu")?.value, model.background.mu)
   };
-  return { numTraces, depthSamples, depthMaxM, distanceStepM, background };
+  return { numTraces, depthSamples, depthMaxM, distanceStepM, depthOffsetM: -airThicknessM, airThicknessM, conductivityMode: "p5", conductivityDtNs: 0.3125, frequencyHz: 500e6, background };
+}
+
+function applyP5Preset() {
+  const values = {
+    "model-traces": 1000,
+    "model-depth-samples": 1000,
+    "model-depth-max": 19.38,
+    "model-dx": 0.02,
+    "fdtd-traces": 451,
+    "fdtd-samples": 640,
+    "fdtd-frequency": 500,
+    "fdtd-offset": 0.317,
+    "fdtd-pml": 10,
+    "fdtd-outstep": 10,
+    "fdtd-air": 0.6,
+    "fdtd-antenna-z": -0.3
+  };
+  for (const [id, value] of Object.entries(values)) {
+    const el = $(`#${id}`);
+    if (el) el.value = value;
+  }
+  fdtdP5Preset = true;
+  markModel2dDirty();
+  renderModel();
+  toast("p5 MATLAB parameters applied.");
+}
+
+function shiftedP5SrcPulse(outputSamples, outstep) {
+  const iterations = Math.max(2, Math.floor(outputSamples) * Math.max(1, Math.floor(outstep)));
+  if (!fdtdSrcPulse?.data?.length) return null;
+  const out = new Float32Array(iterations);
+  for (let i = 0; i < iterations; i++) out[i] = fdtdSrcPulse.data[i + 746] || 0;
+  return out;
 }
 
 function oddAtLeast(value, min) {
@@ -3298,25 +3454,50 @@ function markModel2dDirty() {
   model2dResult = null;
 }
 
+function setModelTool(tool) {
+  modelTool = tool || "select";
+  $$("[data-model-tool]").forEach(btn => btn.classList.toggle("active", btn.dataset.modelTool === modelTool));
+}
+
 function modelPlot(rect) {
-  return { x: 52, y: 18, w: Math.max(20, rect.width - 70), h: Math.max(20, rect.height - 54) };
+  return { x: 0, y: 0, w: Math.max(20, rect.width), h: Math.max(20, rect.height) };
+}
+
+function modelAxisBounds(result = model2dResult || rebuildModel2d()) {
+  const xAxis = result.distanceAxisM || [];
+  const zAxis = result.depthAxisM || [];
+  const xMin = Number(xAxis[0] ?? 0);
+  const xMax = Number(xAxis[xAxis.length - 1] ?? Math.max(1, result.nx - 1));
+  const zMin = Number(zAxis[0] ?? 0);
+  const zMax = Number(zAxis[zAxis.length - 1] ?? Math.max(1, result.nz - 1));
+  return {
+    xMin: Math.min(xMin, xMax),
+    xMax: Math.max(xMin, xMax, xMin + 1e-9),
+    zMin: Math.min(zMin, zMax),
+    zMax: Math.max(zMin, zMax, zMin + 1e-9)
+  };
 }
 
 function modelWorldToCanvas(xM, zM, rect, result = model2dResult || rebuildModel2d()) {
-  const plot = modelPlot(rect), xMax = result.distanceAxisM[result.distanceAxisM.length - 1] || 1, zMax = result.depthAxisM[result.depthAxisM.length - 1] || 1;
-  return { x: plot.x + xM / Math.max(1e-9, xMax) * plot.w, y: plot.y + zM / Math.max(1e-9, zMax) * plot.h };
+  const plot = modelPlot(rect), bounds = modelAxisBounds(result);
+  return {
+    x: plot.x + (xM - bounds.xMin) / Math.max(1e-9, bounds.xMax - bounds.xMin) * plot.w,
+    y: plot.y + (zM - bounds.zMin) / Math.max(1e-9, bounds.zMax - bounds.zMin) * plot.h
+  };
 }
 
 function modelCanvasToWorld(x, y, rect, result = model2dResult || rebuildModel2d()) {
-  const plot = modelPlot(rect), xMax = result.distanceAxisM[result.distanceAxisM.length - 1] || 1, zMax = result.depthAxisM[result.depthAxisM.length - 1] || 1;
-  return { xM: Math.max(0, Math.min(xMax, (x - plot.x) / plot.w * xMax)), zM: Math.max(0, Math.min(zMax, (y - plot.y) / plot.h * zMax)) };
+  const plot = modelPlot(rect), bounds = modelAxisBounds(result);
+  const xM = bounds.xMin + (x - plot.x) / plot.w * (bounds.xMax - bounds.xMin);
+  const zM = bounds.zMin + (y - plot.y) / plot.h * (bounds.zMax - bounds.zMin);
+  return { xM: Math.max(bounds.xMin, Math.min(bounds.xMax, xM)), zM: Math.max(bounds.zMin, Math.min(bounds.zMax, zM)) };
 }
 
 function renderModel() {
   const cv = $("#model-canvas");
   if (!cv) return;
   const result = rebuildModel2d();
-  const rect = cv.parentElement.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  const rect = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
   cv.width = Math.max(1, Math.floor(rect.width * dpr));
   cv.height = Math.max(1, Math.floor(rect.height * dpr));
   const ctx = cv.getContext("2d");
@@ -3338,7 +3519,11 @@ function renderModel() {
       img.data[i + 3] = 255;
     }
   }
-  ctx.putImageData(img, plot.x, plot.y);
+  const off = document.createElement("canvas");
+  off.width = img.width;
+  off.height = img.height;
+  off.getContext("2d").putImageData(img, 0, 0);
+  ctx.drawImage(off, plot.x, plot.y, plot.w, plot.h);
   drawModelHorizons(ctx, rect, result);
   drawModelObjects(ctx, rect, result);
   ctx.restore();
@@ -3350,17 +3535,19 @@ function renderModel() {
 
 function drawModelAxes(ctx, rect, result) {
   const plot = modelPlot(rect);
-  ctx.strokeStyle = canvasTheme.t3; ctx.fillStyle = canvasTheme.t2; ctx.font = "11px Consolas"; ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
-  const xMax = result.distanceAxisM[result.distanceAxisM.length - 1] || 0, zMax = result.depthAxisM[result.depthAxisM.length - 1] || 0;
+  ctx.strokeStyle = canvasTheme.t3; ctx.fillStyle = canvasTheme.t2; ctx.font = "11px Consolas"; ctx.strokeRect(plot.x + 0.5, plot.y + 0.5, plot.w - 1, plot.h - 1);
+  const bounds = modelAxisBounds(result);
   for (let i = 0; i <= 4; i++) {
     const x = plot.x + plot.w * i / 4, z = plot.y + plot.h * i / 4;
     ctx.beginPath(); ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.h); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(plot.x, z); ctx.lineTo(plot.x + plot.w, z); ctx.stroke();
-    ctx.fillText((xMax * i / 4).toFixed(1), x - 8, plot.y + plot.h + 17);
-    ctx.fillText((zMax * i / 4).toFixed(1), 8, z + 4);
+    const xLabel = bounds.xMin + (bounds.xMax - bounds.xMin) * i / 4;
+    const zLabel = bounds.zMin + (bounds.zMax - bounds.zMin) * i / 4;
+    ctx.fillText(xLabel.toFixed(1), Math.max(4, Math.min(rect.width - 40, x + 3)), rect.height - 8);
+    ctx.fillText(zLabel.toFixed(1), 5, Math.max(12, Math.min(rect.height - 6, z + 12)));
   }
-  ctx.fillText("distance (m)", plot.x + plot.w - 78, rect.height - 8);
-  ctx.save(); ctx.translate(14, plot.y + 70); ctx.rotate(-Math.PI / 2); ctx.fillText("depth (m)", 0, 0); ctx.restore();
+  ctx.fillText("distance (m)", Math.max(4, rect.width - 86), 14);
+  ctx.save(); ctx.translate(14, Math.max(80, rect.height / 2)); ctx.rotate(-Math.PI / 2); ctx.fillText("depth (m)", 0, 0); ctx.restore();
 }
 
 function drawModelHorizons(ctx, rect, result) {
@@ -3399,9 +3586,24 @@ function renderModelList() {
   const list = $("#model-list");
   if (!list) return;
   if (!model.objects.length) { list.innerHTML = "No model objects."; return; }
-  list.innerHTML = model.objects.map((o, i) => `<div class="model-object-row${o.id === selectedModelObjectId ? " active" : ""}"><button data-model-select="${escapeHtml(o.id)}">${i + 1}. ${escapeHtml(o.type)} epsr=${axisNumber(o.epsr)}</button><button data-model-delete="${escapeHtml(o.id)}">Del</button></div>`).join("");
-  $$("[data-model-select]").forEach(btn => btn.onclick = () => { selectedModelObjectId = btn.dataset.modelSelect; renderModel(); syncModelObjectForm(); });
-  $$("[data-model-delete]").forEach(btn => btn.onclick = () => { model.objects = model.objects.filter(o => o.id !== btn.dataset.modelDelete); if (selectedModelObjectId === btn.dataset.modelDelete) selectedModelObjectId = ""; markModel2dDirty(); renderModel(); syncModelObjectForm(); });
+  list.innerHTML = model.objects.map((o, i) => `<div class="model-object-row${o.id === selectedModelObjectId ? " active" : ""}"><button data-model-select-index="${i}">${i + 1}. ${escapeHtml(o.type)} epsr=${axisNumber(o.epsr)}</button><button data-model-delete-index="${i}">Del</button></div>`).join("");
+  $$("[data-model-select-index]").forEach(btn => btn.onclick = () => {
+    const object = model.objects[Number(btn.dataset.modelSelectIndex)];
+    selectedModelObjectId = object?.id || "";
+    setModelTool("select");
+    renderModel();
+    syncModelObjectForm();
+  });
+  $$("[data-model-delete-index]").forEach(btn => btn.onclick = event => {
+    event.stopPropagation();
+    const index = Number(btn.dataset.modelDeleteIndex);
+    if (!Number.isInteger(index) || index < 0 || index >= model.objects.length) return;
+    const [removed] = model.objects.splice(index, 1);
+    if (removed?.id === selectedModelObjectId || !model.objects.some(o => o.id === selectedModelObjectId)) selectedModelObjectId = model.objects[Math.min(index, model.objects.length - 1)]?.id || "";
+    markModel2dDirty();
+    renderModel();
+    syncModelObjectForm();
+  });
 }
 
 function syncModelObjectForm() {
@@ -3454,9 +3656,11 @@ bindModel = function bindModelV2() {
   });
   cv.addEventListener("mousemove", e => {
     if (!modelDrag) return;
-    const rect = cv.getBoundingClientRect(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect), object = model.objects.find(o => o.id === modelDrag.id);
+    const rect = cv.getBoundingClientRect(), result = model2dResult || rebuildModel2d(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect, result), object = model.objects.find(o => o.id === modelDrag.id);
     if (!object) return;
-    object.xM = Math.max(0, modelDrag.ox + world.xM - modelDrag.start.xM); object.zM = Math.max(0, modelDrag.oz + world.zM - modelDrag.start.zM);
+    const bounds = modelAxisBounds(result);
+    object.xM = Math.max(bounds.xMin, Math.min(bounds.xMax, modelDrag.ox + world.xM - modelDrag.start.xM));
+    object.zM = Math.max(bounds.zMin, Math.min(bounds.zMax, modelDrag.oz + world.zM - modelDrag.start.zM));
     markModel2dDirty();
     renderModel(); syncModelObjectForm();
   });
@@ -3464,13 +3668,32 @@ bindModel = function bindModelV2() {
 };
 
 async function buildModel2dOutput() {
-  const ds = currentDisplayed();
-  if (!ds) return toast("Import data before building a 2-D model.", "warn");
   const params = { ...currentModelOptions(), horizons: modelSourceHorizons(), layerMaterials: model.layerMaterials, objects: model.objects };
-  const result = await runWorker("model2d-build", ds, params);
-  model2dResult = result.model2d;
-  store.setOutput({ data: result.data, numTraces: result.numTraces, numSamples: result.numSamples, name: "model2d_epsr", meta: result.meta, model2d: result.model2d, depthAxisM: result.depthAxisM, depthStep: result.depthStep }, { name: "Build 2-D Model", op: "model2d-build", params });
-  displaySource = "output"; $("#display-mode").value = "output"; refresh(); renderModel(); toast("2-D electromagnetic model generated.");
+  const result = rebuildModel2d();
+  let epsrMax = 1;
+  for (const value of result.epsrField || []) if (Number.isFinite(value)) epsrMax = Math.max(epsrMax, value);
+  const meta = {
+    sourceFormat: "MODEL2D",
+    verticalAxisKind: "depth",
+    depthAxisM: result.depthAxisM,
+    depthStep: result.depthStepM,
+    distanceAxisM: result.distanceAxisM,
+    x: result.distanceAxisM,
+    radarParams: { dtNs: 0.3125, dxM: result.distanceStepM, depthMaxM: result.depthMaxM, depthDzM: result.depthStepM, velocityMPerNs: 0.1, vofhText: "0.1,0" },
+    displayColormap: "turbo",
+    displayAmpMin: 1,
+    displayAmpMax: Math.max(12, Math.ceil(epsrMax))
+  };
+  const dataset = { data: result.epsrField, numTraces: result.nx, numSamples: result.nz, name: "model2d_epsr", meta, model2d: result, depthAxisM: result.depthAxisM, depthStep: result.depthStepM };
+  model2dResult = result;
+  if (store.current) {
+    store.setOutput(dataset, { name: "Build 2-D Model", op: "model2d-build", params });
+    displaySource = "output"; $("#display-mode").value = "output";
+  } else {
+    store.loadDataset(dataset);
+    displaySource = "current"; $("#display-mode").value = "current";
+  }
+  refresh(); renderModel(); toast("2-D electromagnetic model generated.");
 }
 
 forwardModel = async function forwardModelV2(mode = "tm") {
@@ -3487,6 +3710,16 @@ forwardModel = async function forwardModelV2(mode = "tm") {
     airThicknessM: Math.max(0, Number($("#fdtd-air")?.value || 0.6)),
     antennaZ: finiteNumber($("#fdtd-antenna-z")?.value, -0.3)
   };
+  if (fdtdP5Preset) {
+    const step = modelPayload.distanceStepM || 0.02;
+    fdtd.p5Mode = true;
+    fdtd.dtS = 0.3125e-9 / 10;
+    fdtd.iterations = fdtd.samples * fdtd.outstep;
+    fdtd.startX = 50 * step;
+    fdtd.endX = 950 * step;
+    fdtd.srcpulse = shiftedP5SrcPulse(fdtd.samples, fdtd.outstep);
+    if (!fdtd.srcpulse) toast("P2_pulse_new.mat 未加载，p5 正演将使用内置 Ricker 脉冲。", "warn");
+  }
   $("#footer-status").textContent = `${mode.toUpperCase()} FDTD running...`;
   try {
     fdtdForwardResult = await runWorker(mode === "te" ? "fdtd-te2d" : "fdtd-tm2d", ds, { model2d: modelPayload, fdtd });
