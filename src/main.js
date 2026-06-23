@@ -2766,9 +2766,44 @@ function cloneManualModelSnapshot(result = manualModelResult) {
   };
 }
 
+function safeCurrentModelBounds() {
+  try {
+    return modelAxisBounds(model2dResult || rebuildModel2d());
+  } catch {
+    return null;
+  }
+}
+
+function remapPointBetweenBounds(point, oldBounds, newBounds) {
+  const oldXSpan = Math.max(1e-9, oldBounds.xMax - oldBounds.xMin);
+  const oldZSpan = Math.max(1e-9, oldBounds.zMax - oldBounds.zMin);
+  const fx = (Number(point.xM || 0) - oldBounds.xMin) / oldXSpan;
+  const fz = (Number(point.zM || 0) - oldBounds.zMin) / oldZSpan;
+  return {
+    xM: newBounds.xMin + fx * (newBounds.xMax - newBounds.xMin),
+    zM: newBounds.zMin + fz * (newBounds.zMax - newBounds.zMin)
+  };
+}
+
+function remapModelObjectsBetweenBounds(oldBounds, newBounds) {
+  if (!oldBounds || !newBounds || !Array.isArray(model.objects) || !model.objects.length) return;
+  const sx = (newBounds.xMax - newBounds.xMin) / Math.max(1e-9, oldBounds.xMax - oldBounds.xMin);
+  const sz = (newBounds.zMax - newBounds.zMin) / Math.max(1e-9, oldBounds.zMax - oldBounds.zMin);
+  for (const object of model.objects) {
+    const center = remapPointBetweenBounds(object, oldBounds, newBounds);
+    object.xM = center.xM;
+    object.zM = center.zM;
+    if (object.points?.length) object.points = object.points.map(p => remapPointBetweenBounds(p, oldBounds, newBounds));
+    if (Number.isFinite(Number(object.widthM))) object.widthM = Math.max(0.01, Number(object.widthM) * sx);
+    if (Number.isFinite(Number(object.heightM))) object.heightM = Math.max(0.01, Number(object.heightM) * sz);
+    if (Number.isFinite(Number(object.radiusM))) object.radiusM = Math.max(0.01, Number(object.radiusM) * sx);
+  }
+}
+
 function transferManualModelToBuilder() {
   const result = manualModelResult || generateManualModel();
   if (!result) return;
+  const oldBounds = model.objects?.length ? safeCurrentModelBounds() : null;
   const snapshot = cloneManualModelSnapshot(result);
   model.sourceMode = "manual-snapshot";
   model.manualSnapshot = snapshot;
@@ -2780,6 +2815,9 @@ function transferManualModelToBuilder() {
   if ($("#model-dx")) $("#model-dx").value = axisNumber(snapshot.distanceStep || snapshot.dxM || 0.05);
   if ($("#model-view-mode")) $("#model-view-mode").value = "geology";
   modelViewMode = "geology";
+  markModel2dDirty();
+  const newResult = rebuildModel2d();
+  remapModelObjectsBetweenBounds(oldBounds, modelAxisBounds(newResult));
   markModel2dDirty();
   switchPage("model");
   renderModel();
@@ -4082,7 +4120,35 @@ function setModelTool(tool) {
 }
 
 function modelPlot(rect) {
-  return { x: 0, y: 0, w: Math.max(20, rect.width), h: Math.max(20, rect.height) };
+  return plotLayout(Math.max(20, rect.width), Math.max(20, rect.height), { axes: true, colorbar: false, fullBleed: false }).plot;
+}
+
+function modelAxisRender(ctx, rect, result = model2dResult || rebuildModel2d()) {
+  const layout = plotLayout(Math.max(20, rect.width), Math.max(20, rect.height), { axes: true, colorbar: false, fullBleed: false });
+  const bounds = modelAxisBounds(result);
+  const dx = Math.max(1e-12, Number(result.distanceStepM || (bounds.xMax - bounds.xMin) / Math.max(1, result.nx - 1)) || 0.05);
+  const dz = Math.max(1e-12, Number(result.depthStepM || (bounds.zMax - bounds.zMin) / Math.max(1, result.nz - 1)) || dx);
+  return {
+    ctx,
+    cssW: rect.width,
+    cssH: rect.height,
+    layout,
+    scale: {
+      traces: result.nx || 1,
+      samples: result.nz || 1,
+      sampleMax: result.nz || 1,
+      traceStart: bounds.xMin / dx,
+      traceEnd: bounds.xMax / dx,
+      sampleStart: 0,
+      sampleEnd: result.nz || 1,
+      depthStart: bounds.zMin,
+      depthEnd: bounds.zMax,
+      depthMax: Math.max(1e-9, bounds.zMax - bounds.zMin),
+      depthStep: dz,
+      distanceStep: dx,
+      layout
+    }
+  };
 }
 
 function modelAxisBounds(result = model2dResult || rebuildModel2d()) {
@@ -4108,10 +4174,13 @@ function modelWorldToCanvas(xM, zM, rect, result = model2dResult || rebuildModel
   };
 }
 
-function modelCanvasToWorld(x, y, rect, result = model2dResult || rebuildModel2d()) {
+function modelCanvasToWorld(x, y, rect, result = model2dResult || rebuildModel2d(), options = {}) {
   const plot = modelPlot(rect), bounds = modelAxisBounds(result);
-  const xM = bounds.xMin + (x - plot.x) / plot.w * (bounds.xMax - bounds.xMin);
-  const zM = bounds.zMin + (y - plot.y) / plot.h * (bounds.zMax - bounds.zMin);
+  if (!options.clamp && (x < plot.x || x > plot.x + plot.w || y < plot.y || y > plot.y + plot.h)) return null;
+  const px = options.clamp ? Math.max(plot.x, Math.min(plot.x + plot.w, x)) : x;
+  const py = options.clamp ? Math.max(plot.y, Math.min(plot.y + plot.h, y)) : y;
+  const xM = bounds.xMin + (px - plot.x) / plot.w * (bounds.xMax - bounds.xMin);
+  const zM = bounds.zMin + (py - plot.y) / plot.h * (bounds.zMax - bounds.zMin);
   return { xM: Math.max(bounds.xMin, Math.min(bounds.xMax, xM)), zM: Math.max(bounds.zMin, Math.min(bounds.zMax, zM)) };
 }
 
@@ -4223,20 +4292,7 @@ function renderModel() {
 };
 
 function drawModelAxes(ctx, rect, result) {
-  const plot = modelPlot(rect);
-  ctx.strokeStyle = canvasTheme.t3; ctx.fillStyle = canvasTheme.t2; ctx.font = "11px Consolas"; ctx.strokeRect(plot.x + 0.5, plot.y + 0.5, plot.w - 1, plot.h - 1);
-  const bounds = modelAxisBounds(result);
-  for (let i = 0; i <= 4; i++) {
-    const x = plot.x + plot.w * i / 4, z = plot.y + plot.h * i / 4;
-    ctx.beginPath(); ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.h); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(plot.x, z); ctx.lineTo(plot.x + plot.w, z); ctx.stroke();
-    const xLabel = bounds.xMin + (bounds.xMax - bounds.xMin) * i / 4;
-    const zLabel = bounds.zMin + (bounds.zMax - bounds.zMin) * i / 4;
-    ctx.fillText(xLabel.toFixed(1), Math.max(4, Math.min(rect.width - 40, x + 3)), rect.height - 8);
-    ctx.fillText(zLabel.toFixed(1), 5, Math.max(12, Math.min(rect.height - 6, z + 12)));
-  }
-  ctx.fillText("distance (m)", Math.max(4, rect.width - 86), 14);
-  ctx.save(); ctx.translate(14, Math.max(80, rect.height / 2)); ctx.rotate(-Math.PI / 2); ctx.fillText("depth (m)", 0, 0); ctx.restore();
+  drawPlotAxes(ctx, modelAxisRender(ctx, rect, result), { axes: true });
 }
 
 function drawModelHorizons(ctx, rect, result) {
@@ -4363,17 +4419,54 @@ function updateSelectedModelObject() {
   syncModelObjectForm();
 }
 
-function addModelObject(type, world) {
-  const preset = MATERIAL_PRESETS.find(m => m.id === "rock");
-  const material = preset ? { materialId: preset.id, name: preset.name, epsr: preset.epsr, sigma: preset.sigma, mu: preset.mu } : { materialId: "custom" };
-  const object = createIrregularBodyObject({
+function randomIrregularCanvasPoints(center, radiusPx) {
+  const count = 5 + Math.floor(Math.random() * 4);
+  const angles = Array.from({ length: count }, () => Math.random() * Math.PI * 2).sort((a, b) => a - b);
+  return angles.map(angle => {
+    const r = radiusPx * (0.8 + 0.4 * Math.random());
+    return {
+      x: center.x + Math.cos(angle) * r + radiusPx * 0.18 * (Math.random() * 2 - 1),
+      y: center.y + Math.sin(angle) * r + radiusPx * 0.18 * (Math.random() * 2 - 1)
+    };
+  });
+}
+
+function createDisplayIrregularObject(world, rect, result, material) {
+  if (!rect || !result) {
+    return createIrregularBodyObject({
+      xM: world.xM,
+      zM: world.zM,
+      radiusM: modelToolDefaults.irregularRadiusM,
+      ...material,
+      id: createModelObjectId(),
+      seed: Date.now() + Math.floor(Math.random() * 1e6)
+    });
+  }
+  const bounds = modelAxisBounds(result);
+  const plot = modelPlot(rect);
+  const center = modelWorldToCanvas(world.xM, world.zM, rect, result);
+  const radiusM = Math.max(0.01, modelToolDefaults.irregularRadiusM);
+  const radiusPx = Math.max(5, radiusM / Math.max(1e-9, bounds.xMax - bounds.xMin) * plot.w);
+  const points = randomIrregularCanvasPoints(center, radiusPx)
+    .map(p => modelCanvasToWorld(p.x, p.y, rect, result, { clamp: true }))
+    .filter(Boolean);
+  return normalizeObject({
+    type: "irregular",
     xM: world.xM,
     zM: world.zM,
-    radiusM: modelToolDefaults.irregularRadiusM,
+    radiusM,
+    widthM: radiusM * 2,
+    heightM: radiusM * 2,
+    points,
     ...material,
-    id: createModelObjectId(),
-    seed: Date.now() + Math.floor(Math.random() * 1e6)
+    id: createModelObjectId()
   });
+}
+
+function addModelObject(type, world, rect = null, result = null) {
+  const preset = MATERIAL_PRESETS.find(m => m.id === "rock");
+  const material = preset ? { materialId: preset.id, name: preset.name, epsr: preset.epsr, sigma: preset.sigma, mu: preset.mu } : { materialId: "custom" };
+  const object = createDisplayIrregularObject(world, rect, result || (model2dResult || rebuildModel2d()), material);
   model.objects.push(object); selectedModelObjectId = object.id; markModel2dDirty(); renderModel(); syncModelObjectForm();
 }
 
@@ -4513,18 +4606,20 @@ bindModel = function bindModelV2() {
   }, { passive: false });
   cv.addEventListener("mousedown", e => {
     if (e.button === 2) return;
-    const rect = cv.getBoundingClientRect(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect);
+    const rect = cv.getBoundingClientRect(), result = model2dResult || rebuildModel2d(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect, result);
+    if (!world) return;
     if (modelTool === "select") {
       const hit = hitModelObject(world);
       selectedModelObjectId = hit?.id || ""; syncModelObjectForm(); renderModel();
       if (hit) modelDrag = { id: hit.id, start: world, ox: hit.xM, oz: hit.zM };
       return;
     }
-    addModelObject("irregular", world);
+    addModelObject("irregular", world, rect, result);
   });
   cv.addEventListener("mousemove", e => {
     if (!modelDrag) return;
-    const rect = cv.getBoundingClientRect(), result = model2dResult || rebuildModel2d(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect, result), object = model.objects.find(o => o.id === modelDrag.id);
+    const rect = cv.getBoundingClientRect(), result = model2dResult || rebuildModel2d(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect, result, { clamp: true }), object = model.objects.find(o => o.id === modelDrag.id);
+    if (!world) return;
     if (!object) return;
     const bounds = modelAxisBounds(result);
     const nextX = Math.max(bounds.xMin, Math.min(bounds.xMax, modelDrag.ox + world.xM - modelDrag.start.xM));
