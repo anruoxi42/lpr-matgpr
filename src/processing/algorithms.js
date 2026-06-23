@@ -1080,6 +1080,301 @@ export function splitStepMigration(d, nt, ns, params = {}) {
   return { data: out, numTraces: nt, numSamples: zAxis.length, depthAxisM: zAxis, depthStep: dzM, verticalAxisKind: "depth", vofh: mp.vofh };
 }
 
+export function splitStepForward2d(model = {}, params = {}) {
+  const nx = Math.max(1, Math.floor(Number(model.nx || model.numTraces || 0)));
+  const nz = Math.max(1, Math.floor(Number(model.nz || model.numSamples || 0)));
+  if (!nx || !nz) throw new Error("Split-step forward requires a valid 2-D model.");
+  const total = nx * nz;
+  const eps = modelField(model, ["epsrField", "ep", "data"], total, 1);
+  const mu = modelField(model, ["muField", "mu"], total, 1);
+  const sig = modelField(model, ["sigmaField", "sig", "cd"], total, 0);
+  const dxM = positiveNumber(params.dxM ?? params.distanceStepM ?? model.distanceStepM, inferAxisStep(model.distanceAxisM, 0.02));
+  const dzM = positiveNumber(params.dzM ?? params.depthStepM ?? model.depthStepM, inferAxisStep(model.depthAxisM, dxM));
+  const nt = Math.max(16, Math.floor(Number(params.nt || params.samples || params.numSamples || 512)));
+  const dtS = positiveNumber(params.dtS, positiveNumber(params.dtNs, 0.625) * 1e-9);
+  const frequencyHz = positiveNumber(params.frequencyHz, positiveNumber(params.frequencyMHz, 500) * 1e6);
+  const band = Number.isFinite(Number(params.band)) ? Number(params.band) : 1;
+  const nt2 = nextPow2(nt);
+  const nxfft = nextPow2(nx);
+  const half = Math.floor(nt2 / 2);
+  const kStart = band === 0
+    ? clamp(Math.floor(nt2 * dtS * frequencyHz * 0.25), 1, half)
+    : 1;
+  const kEnd = band === 0
+    ? clamp(Math.floor(nt2 * dtS * frequencyHz * 2), kStart, half)
+    : half;
+  const omega = new Float64Array(half + 1);
+  const bomega2 = new Float64Array(half + 1);
+  const taper = new Float64Array(half + 1);
+  taper.fill(1);
+  for (let iw = kStart; iw <= kEnd; iw++) omega[iw] = iw * 2 * Math.PI / (nt2 * dtS);
+  if (band > 0) {
+    const iwc = Math.max(1, Math.floor(nt2 * dtS * frequencyHz));
+    const sigmaBins = Math.max(1, (kEnd - kStart + 1) * band);
+    for (let iw = kStart; iw <= kEnd; iw++) taper[iw] = Math.exp(-(((iw - iwc) / sigmaBins) ** 2));
+  }
+
+  const q = buildQualityField(model, eps, sig, total, frequencyHz);
+  const vit = new Float64Array(total);
+  const vitm = new Float64Array(nz);
+  const qm = new Float64Array(nz);
+  const m0 = 4 * Math.PI * 1e-7;
+  const e0 = 8.8592e-12;
+  for (let iz = 0; iz < nz; iz++) {
+    let vSum = 0;
+    let qSum = 0;
+    for (let ix = 0; ix < nx; ix++) {
+      const idx = iz * nx + ix;
+      const epsr = Math.max(1e-9, Number(eps[idx]) || 1);
+      const mur = Math.max(1e-9, Number(mu[idx]) || 1);
+      const qq = clamp(Number(q[idx]) || 1e6, 1, 1e6);
+      const cosTerm = Math.max(1e-9, Math.abs(Math.cos((Math.PI / 4) * (1 - (2 / Math.PI) * Math.atan(qq)))));
+      const velocity = 1 / (Math.sqrt(m0 * mur * e0 * epsr) * cosTerm);
+      vit[idx] = Number.isFinite(velocity) && velocity > 0 ? velocity : 299792458 / Math.sqrt(epsr);
+      vSum += vit[idx] / 2;
+      qSum += qq;
+    }
+    vitm[iz] = Math.max(1e-9, vSum / nx);
+    qm[iz] = Math.max(1, qSum / nx);
+  }
+  for (let iw = kStart; iw <= kEnd; iw++) bomega2[iw] = (omega[iw] / vitm[0]) ** 2;
+
+  const zpR = new Float64Array(nz * nxfft);
+  const zpI = new Float64Array(nz * nxfft);
+  for (let iz = 1; iz < nz; iz++) {
+    const row = iz * nxfft;
+    const prev = (iz - 1) * nx;
+    const curr = iz * nx;
+    for (let ix = 0; ix < nx; ix++) {
+      const c1 = matgprReflectorRoot(eps[curr + ix], mu[curr + ix], q[curr + ix]);
+      const c0 = matgprReflectorRoot(eps[prev + ix], mu[prev + ix], q[prev + ix]);
+      const den = cdiv(1, 0, c1.r + c0.r, c1.i + c0.i);
+      const rr = c1.r - c0.r;
+      const ri = c1.i - c0.i;
+      zpR[row + ix] = rr * den.r - ri * den.i;
+      zpI[row + ix] = rr * den.i + ri * den.r;
+    }
+  }
+  for (let iz = 0; iz < nz; iz++) fft(zpR.subarray(iz * nxfft, iz * nxfft + nxfft), zpI.subarray(iz * nxfft, iz * nxfft + nxfft));
+
+  const cpR = new Float64Array(nt2 * nxfft);
+  const cpI = new Float64Array(nt2 * nxfft);
+  const waven = new Float64Array(nxfft);
+  const waven2 = new Float64Array(nxfft);
+  for (let ik = 0; ik < nxfft; ik++) {
+    const folded = ik <= nxfft / 2 ? ik : nxfft - ik;
+    const kx = folded * 2 * Math.PI / (nxfft * dxM);
+    waven[ik] = kx;
+    waven2[ik] = kx * kx;
+  }
+
+  const meanKR = new Float64Array(half + 1);
+  const meanKI = new Float64Array(half + 1);
+  const dencR = new Float64Array(half + 1);
+  const dencI = new Float64Array(half + 1);
+  const alf1 = Math.PI * 60 / 180;
+  const alf2 = Math.PI * 80 / 180;
+  const wr = 2 * Math.PI * frequencyHz;
+  for (let iz = nz - 1; iz >= 0; iz--) {
+    const nq = (2 / Math.PI) * Math.atan(qm[iz]);
+    const expq = (1 - nq) / 2;
+    const tanq = Math.tan((1 - nq) * Math.PI / 4);
+    for (let iw = kStart; iw <= kEnd; iw++) {
+      const ratio = Math.max(1e-12, (omega[iw] / wr) ** expq);
+      const br = omega[iw] / (vitm[iz] * ratio);
+      const bi = br * tanq;
+      meanKR[iw] = br;
+      meanKI[iw] = bi;
+      dencR[iw] = br * br - bi * bi;
+      dencI[iw] = 2 * br * bi;
+    }
+    const zrow = iz * nxfft;
+    for (let ik = 0; ik < nxfft; ik++) {
+      const den = waven2[ik];
+      for (let iw = kStart; iw <= kEnd; iw++) {
+        const kz = csqrt(dencR[iw] - den, dencI[iw]);
+        const amp = Math.exp(Math.max(-60, Math.min(60, -Math.abs(dzM * kz.i))));
+        const phase = dzM * kz.r;
+        let sr = Math.cos(phase) * amp;
+        let si = Math.sin(phase) * amp;
+        const dif = bomega2[iw] - den;
+        let radiation = 1;
+        if (dif > 0) {
+          const tet = Math.atan(waven[ik] / Math.max(1e-30, Math.sqrt(dif)));
+          if (tet > alf2) radiation = 0;
+          else if (tet > alf1) {
+            const a = 1 + (tet - alf1) / (alf2 - alf1);
+            radiation = 0.42 - 0.5 * Math.cos(a * Math.PI) + 0.08 * Math.cos(a * 2 * Math.PI);
+          }
+        }
+        const idx = iw * nxfft + ik;
+        const cr = cpR[idx] * sr - cpI[idx] * si;
+        const ci = cpR[idx] * si + cpI[idx] * sr;
+        cpR[idx] = (cr * taper[iw] + zpR[zrow + ik]) * radiation;
+        cpI[idx] = (ci * taper[iw] + zpI[zrow + ik]) * radiation;
+      }
+    }
+    for (let iw = kStart; iw <= kEnd; iw++) fft(cpR.subarray(iw * nxfft, iw * nxfft + nxfft), cpI.subarray(iw * nxfft, iw * nxfft + nxfft), true);
+    for (let ix = 0; ix < nx; ix++) {
+      const midx = iz * nx + ix;
+      const localQ = Math.max(1, q[midx]);
+      const localNq = (2 / Math.PI) * Math.atan(localQ);
+      const localExpq = (1 - localNq) / 2;
+      const localTan = Math.tan((1 - localNq) * Math.PI / 4);
+      for (let iw = kStart; iw <= kEnd; iw++) {
+        const ratio = Math.max(1e-12, (omega[iw] / wr) ** localExpq);
+        const lr = omega[iw] / ((vit[midx] * ratio) / 2);
+        const li = lr * localTan;
+        const realPhase = (meanKI[iw] - li) * dzM;
+        const imagPhase = -(meanKR[iw] - lr) * dzM;
+        const amp = Math.exp(Math.max(-60, Math.min(60, realPhase)));
+        const sr = Math.cos(imagPhase) * amp;
+        const si = Math.sin(imagPhase) * amp;
+        const idx = iw * nxfft + ix;
+        const cr = cpR[idx] * sr - cpI[idx] * si;
+        cpI[idx] = cpR[idx] * si + cpI[idx] * sr;
+        cpR[idx] = cr;
+      }
+    }
+    for (let ix = nx; ix < nxfft; ix++) {
+      for (let iw = kStart; iw <= kEnd; iw++) {
+        const idx = iw * nxfft + ix;
+        cpR[idx] = 0;
+        cpI[idx] = 0;
+      }
+    }
+    for (let iw = kStart; iw <= kEnd; iw++) fft(cpR.subarray(iw * nxfft, iw * nxfft + nxfft), cpI.subarray(iw * nxfft, iw * nxfft + nxfft));
+    params.onProgress?.({ progress: (nz - iz) / nz, depthIndex: iz, depthCount: nz });
+  }
+  for (let iw = kStart; iw <= kEnd; iw++) fft(cpR.subarray(iw * nxfft, iw * nxfft + nxfft), cpI.subarray(iw * nxfft, iw * nxfft + nxfft), true);
+  for (let iw = kStart; iw <= kEnd; iw++) {
+    const mirror = nt2 - iw;
+    if (mirror <= 0 || mirror >= nt2 || mirror === iw) continue;
+    for (let ix = 0; ix < nxfft; ix++) {
+      cpR[mirror * nxfft + ix] = cpR[iw * nxfft + ix];
+      cpI[mirror * nxfft + ix] = -cpI[iw * nxfft + ix];
+    }
+  }
+
+  const xAxis = axisFromModel(model.distanceAxisM, nx, dxM);
+  const traceCount = Math.max(1, Math.floor(Number(params.traceCount || params.numTraces || nx)));
+  const startX = Number.isFinite(Number(params.startX)) ? Number(params.startX) : xAxis[0];
+  const endX = Number.isFinite(Number(params.endX)) ? Number(params.endX) : xAxis[xAxis.length - 1];
+  const srcx = new Float32Array(traceCount);
+  const data = new Float32Array(traceCount * nt);
+  const timeAxisNs = new Float32Array(nt);
+  const tout = new Float64Array(nt);
+  for (let is = 0; is < nt; is++) {
+    tout[is] = is * dtS;
+    timeAxisNs[is] = is * dtS * 1e9;
+  }
+  const trR = new Float64Array(nt2);
+  const trI = new Float64Array(nt2);
+  for (let it = 0; it < traceCount; it++) {
+    const targetX = traceCount === 1 ? (startX + endX) / 2 : startX + (endX - startX) * it / (traceCount - 1);
+    let ix = Math.round((targetX - xAxis[0]) / Math.max(1e-12, dxM));
+    ix = clamp(ix, 0, nx - 1);
+    srcx[it] = xAxis[ix];
+    trR.fill(0);
+    trI.fill(0);
+    for (let iw = 0; iw < nt2; iw++) {
+      const idx = iw * nxfft + ix;
+      trR[iw] = cpR[idx];
+      trI[iw] = cpI[idx];
+    }
+    fft(trR, trI);
+    for (let is = 0; is < nt; is++) data[it * nt + is] = Number.isFinite(trR[is]) ? trR[is] : 0;
+  }
+  return {
+    data,
+    numTraces: traceCount,
+    numSamples: nt,
+    tout,
+    srcx,
+    recx: srcx,
+    x: srcx,
+    dtNs: dtS * 1e9,
+    dxM: traceCount > 1 ? Math.abs(srcx[1] - srcx[0]) : dxM,
+    name: "split_step_forward2d",
+    backend: "js-worker-split-step",
+    meta: {
+      verticalAxisKind: "time",
+      timeAxisNs,
+      distanceAxisM: srcx,
+      x: srcx,
+      radarParams: {
+        dtNs: dtS * 1e9,
+        dxM: traceCount > 1 ? Math.abs(srcx[1] - srcx[0]) : dxM,
+        antennaFreqMHz: frequencyHz / 1e6
+      }
+    }
+  };
+}
+
+function modelField(model, keys, length, fallback) {
+  for (const key of keys) {
+    const value = model?.[key];
+    if (value?.length === length) return value;
+  }
+  const out = new Float32Array(length);
+  out.fill(fallback);
+  return out;
+}
+
+function buildQualityField(model, eps, sig, length, frequencyHz) {
+  const source = model.qField || model.q || model.Q;
+  if (source?.length === length) return Float32Array.from(source, v => clamp(Number(v) || 1e6, 1, 1e6));
+  const out = new Float32Array(length);
+  const e0 = 8.8592e-12;
+  for (let i = 0; i < length; i++) {
+    const sigma = Math.max(0, Number(sig[i]) || 0);
+    const epsr = Math.max(1e-9, Number(eps[i]) || 1);
+    out[i] = sigma <= 1e-18 ? 1e6 : clamp(2 * Math.PI * frequencyHz * e0 * epsr / sigma, 1, 1e6);
+  }
+  return out;
+}
+
+function matgprReflectorRoot(epsrInput, muInput, qInput) {
+  const epsr = Math.max(1e-9, Number(epsrInput) || 1);
+  const mur = Math.max(1e-9, Number(muInput) || 1);
+  const q = clamp(Number(qInput) || 1e6, 1, 1e6);
+  const angle = Math.atan(q);
+  const denR = epsr * Math.sin(angle);
+  const denI = Math.cos(epsr * angle);
+  const ratio = cdiv(mur, 0, denR, denI);
+  return csqrt(ratio.r, ratio.i);
+}
+
+function cdiv(ar, ai, br, bi) {
+  const den = br * br + bi * bi || 1e-30;
+  return { r: (ar * br + ai * bi) / den, i: (ai * br - ar * bi) / den };
+}
+
+function csqrt(ar, ai) {
+  const mag = Math.hypot(ar, ai);
+  const r = Math.sqrt(Math.max(0, (mag + ar) / 2));
+  const i = (ai < 0 ? -1 : 1) * Math.sqrt(Math.max(0, (mag - ar) / 2));
+  return { r: Number.isFinite(r) ? r : 0, i: Number.isFinite(i) ? i : 0 };
+}
+
+function positiveNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function inferAxisStep(axis, fallback) {
+  if (axis?.length > 1) {
+    const step = Math.abs(Number(axis[1]) - Number(axis[0]));
+    if (Number.isFinite(step) && step > 0) return step;
+  }
+  return fallback;
+}
+
+function axisFromModel(axis, count, step) {
+  if (axis?.length === count) return Float32Array.from(axis);
+  return Float32Array.from({ length: count }, (_, i) => i * step);
+}
+
 export function simpleMigration(d, nt, ns, velocity = 0.1, dt = 0.625, dx = 0.05) {
   const o = new Float32Array(d.length), radius = Math.max(1, Math.round(velocity * dt / Math.max(dx, 1e-6) * 3));
   for (let t = 0; t < nt; t++) for (let s = 0; s < ns; s++) {

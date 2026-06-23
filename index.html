@@ -115,7 +115,7 @@
           <button data-page="interpret">Geologic Interpretation 地质解释</button>
           <button data-page="random-p5" data-random-step="p5_1">随机介质模型生成</button>
           <button data-page="random-p5" data-random-step="p5_2">电磁参数换算</button>
-          <button data-page="random-p5" data-random-step="p5_3">FDTD 仿真</button>
+          <button data-page="random-p5" data-random-step="p5_3">快速正演</button>
           <button data-page="model">Build 2-D Model 构建二维模型</button>
         </div>
       </div>
@@ -328,10 +328,7 @@
           <div id="model-layer-materials" class="layer-material-list"></div>
           <div class="button-row">
             <button data-model-tool="select">选择</button>
-            <button data-model-tool="circle">圆形</button>
-            <button data-model-tool="rectangle">矩形</button>
-            <button data-model-tool="pipe">管道</button>
-            <button data-model-tool="polygon">多边形</button>
+            <button data-model-tool="irregular">不规则体</button>
           </div>
           <label>模型道数<input id="model-traces" type="number" value="301" min="9" step="2"></label>
           <label>深度网格<input id="model-depth-samples" type="number" value="241" min="9" step="2"></label>
@@ -340,30 +337,16 @@
           <div class="button-row">
             <button id="model-build">生成电磁模型</button>
             <button id="model-p5-preset">p5 参数</button>
-            <button id="model-fdtd-tm" class="primary">TM 正演</button>
-            <button id="model-fdtd-te">TE 正演</button>
+            <button id="model-fdtd-tm" class="primary">快速正演</button>
           </div>
-          <label>FDTD 道数<input id="fdtd-traces" type="number" value="80" min="1" step="5"></label>
-          <label>FDTD 样点<input id="fdtd-samples" type="number" value="260" min="16" step="20"></label>
+          <label>正演道数<input id="fdtd-traces" type="number" value="80" min="1" step="5"></label>
+          <label>时间样点<input id="fdtd-samples" type="number" value="260" min="16" step="20"></label>
           <label>主频 MHz<input id="fdtd-frequency" type="number" value="500" min="1" step="10"></label>
-          <label>收发距 m<input id="fdtd-offset" type="number" value="0.317" step="0.001"></label>
-          <label>PML 网格<input id="fdtd-pml" type="number" value="8" min="2" step="1"></label>
-          <label>输出步长<input id="fdtd-outstep" type="number" value="1" min="1" step="1"></label>
           <label>空气层 m<input id="fdtd-air" type="number" value="0.6" min="0" step="0.02"></label>
-          <label>天线 Z m<input id="fdtd-antenna-z" type="number" value="-0.3" step="0.01"></label>
-          <details class="fdtd-advanced">
-            <summary>FDTD 高级</summary>
-            <label>后端模式<select id="fdtd-backend"><option value="auto">自动</option><option value="python">Python CPU</option><option value="js">浏览器 JS</option></select></label>
-            <label class="toggle-label"><input id="fdtd-preview" type="checkbox"> 快速预览</label>
-            <div id="fdtd-diagnostics" class="list muted">自动选择最快可用后端。</div>
-          </details>
-          <h3>Object Properties</h3>
-          <label>类型<select id="model-object-type" disabled><option value="circle">circle</option><option value="rectangle">rectangle</option><option value="pipe">pipe</option><option value="polygon">polygon</option><option value="ellipse">ellipse</option></select></label>
+          <h3>不规则体参数</h3>
           <label>X m<input id="model-object-x" type="number" step="0.01" disabled></label>
           <label>Z m<input id="model-object-z" type="number" step="0.01" disabled></label>
-          <label>宽 m<input id="model-object-width" type="number" step="0.01" disabled></label>
-          <label>高 m<input id="model-object-height" type="number" step="0.01" disabled></label>
-          <label>半径 m<input id="model-object-radius" type="number" step="0.01" disabled></label>
+          <label>等效半径 m<input id="model-object-radius" type="number" step="0.01" disabled></label>
           <label>物体 εr<input id="model-object-epsr" type="number" step="0.1" disabled></label>
           <label>物体 σ<input id="model-object-sigma" type="number" step="0.001" disabled></label>
           <label>物体 μ<input id="model-object-mu" type="number" step="0.1" disabled></label>
@@ -387,7 +370,7 @@
           <div class="button-row">
             <button data-random-step="p5_1" class="active">p5_1 随机介质</button>
             <button data-random-step="p5_2">p5_2 参数换算</button>
-            <button data-random-step="p5_3">p5_3 FDTD</button>
+            <button data-random-step="p5_3">p5_3 快速正演</button>
           </div>
           <button data-action="p5-run-step" class="primary">运行当前步骤并导出 MAT</button>
           <h3>p5_1 参数</h3>
@@ -438,21 +421,9 @@
           <label>空气行 l_THK<input id="p5-air-rows" class="p5-control" type="number" value="30" min="0" step="1"></label>
           <label>换算频率 MHz<input id="p5-frequency" class="p5-control" type="number" value="500" min="1" step="10"></label>
           <label>换算 dt ns<input id="p5-conductivity-dt" class="p5-control" type="number" value="0.3125" min="0.0001" step="0.0001"></label>
-          <label>FDTD 模式<select id="p5-fdtd-mode"><option value="tm">TM</option><option value="te">TE</option></select></label>
-          <label>FDTD 道数<input id="p5-fdtd-traces" type="number" value="451" min="1" step="2"></label>
-          <label>FDTD 样点<input id="p5-fdtd-samples" type="number" value="640" min="16" step="20"></label>
+          <label>正演道数<input id="p5-fdtd-traces" type="number" value="451" min="1" step="2"></label>
+          <label>时间样点<input id="p5-fdtd-samples" type="number" value="640" min="16" step="20"></label>
           <label>主频 MHz<input id="p5-fdtd-frequency" type="number" value="500" min="1" step="10"></label>
-          <label>输出步长<input id="p5-fdtd-outstep" type="number" value="10" min="1" step="1"></label>
-          <label>收发距 m<input id="p5-fdtd-offset" type="number" value="0.317" step="0.001"></label>
-          <label>PML 网格<input id="p5-fdtd-pml" type="number" value="10" min="2" step="1"></label>
-          <label>空气层 m<input id="p5-fdtd-air" type="number" value="0.6" min="0" step="0.02"></label>
-          <label>天线 Z m<input id="p5-fdtd-antenna-z" type="number" value="-0.3" step="0.01"></label>
-          <details class="fdtd-advanced">
-            <summary>FDTD 高级</summary>
-            <label>后端模式<select id="p5-fdtd-backend"><option value="auto">自动</option><option value="python">Python CPU</option><option value="js">浏览器 JS</option></select></label>
-            <label class="toggle-label"><input id="p5-fdtd-preview" type="checkbox"> 快速预览</label>
-            <div id="p5-fdtd-diagnostics" class="list muted">自动选择最快可用后端。</div>
-          </details>
           <div id="p5-status" class="list muted">p5_1 pending · p5_2 pending · p5_3 pending</div>
         </aside>
       </section>

@@ -14,6 +14,7 @@ import {
   resample,
   sparseDecon,
   slidingBackground,
+  splitStepForward2d,
   spectrum,
   splitStepMigration,
   stoltMigration,
@@ -283,6 +284,9 @@ const gridEstimate = estimateGridSpacing(9, 1, Float32Array.from([0, 1, 0, -1, 0
 assert(gridEstimate.dx > 0 && gridEstimate.fmax > 0, "finddx port failed");
 
 const fdtdModel = manualHorizonsToModel([h1], { numTraces: 18, depthSamples: 18, depthMaxM: 1.8, distanceStepM: 0.05 });
+const fastForward = splitStepForward2d(fdtdModel, { traceCount: 5, samples: 32, frequencyHz: 300e6, dtNs: 0.625 });
+finite(fastForward.data, "split-step forward");
+assert(fastForward.numTraces === 5 && fastForward.numSamples === 32 && rms(fastForward.data) > 0, "split-step forward dimensions/output failed");
 let evenGridRejected = false;
 try {
   simulateTm2d(modelToFdtdGrid(fdtdModel), { traceCount: 3, samples: 24, frequencyHz: 300e6, npml: 3, receiverOffsetM: 0.05 });

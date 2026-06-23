@@ -199,6 +199,27 @@ export function applyObjectsToModel(model) {
   return model;
 }
 
+export function createIrregularBodyObject(options = {}) {
+  const xM = finiteNumber(options.xM ?? options.x ?? options.centerX, 0);
+  const zM = finiteNumber(options.zM ?? options.z ?? options.centerDepth, 0);
+  const radiusM = positive(options.radiusM ?? options.radius ?? options.r, 0.25);
+  const rng = mulberry32(Number(options.seed) || Math.floor(Math.random() * 0xffffffff));
+  const material = normalizeMaterial(options, MATERIAL_PRESETS.find(m => m.id === options.materialId) || MATERIAL_PRESETS[1]);
+  const points = randomPolygon(xM, zM, radiusM, rng).map(p => ({ xM: p.x, zM: p.z }));
+  return normalizeObject({
+    ...material,
+    ...options,
+    type: "irregular",
+    name: options.name || material.name || "Irregular body",
+    xM,
+    zM,
+    radiusM,
+    widthM: radiusM * 2,
+    heightM: radiusM * 2,
+    points
+  });
+}
+
 export function modelToFdtdGrid(model) {
   return {
     nx: model.nx,
@@ -286,7 +307,7 @@ export function objectBounds(object) {
   if (o.type === "circle" || o.type === "pipe") {
     return { left: o.xM - o.radiusM, right: o.xM + o.radiusM, top: o.zM - o.radiusM, bottom: o.zM + o.radiusM };
   }
-  if (o.type === "polygon" && o.points.length) {
+  if ((o.type === "polygon" || o.type === "irregular") && o.points.length) {
     return {
       left: Math.min(...o.points.map(p => p.xM)),
       right: Math.max(...o.points.map(p => p.xM)),
@@ -301,7 +322,7 @@ function pointInObject(x, z, object) {
   const o = object;
   if (o.type === "circle" || o.type === "pipe") return (x - o.xM) ** 2 + (z - o.zM) ** 2 <= o.radiusM ** 2;
   if (o.type === "ellipse") return ((x - o.xM) / (o.widthM / 2)) ** 2 + ((z - o.zM) / (o.heightM / 2)) ** 2 <= 1;
-  if (o.type === "polygon" && o.points.length >= 3) return pointInPolygon(x, z, o.points);
+  if ((o.type === "polygon" || o.type === "irregular") && o.points.length >= 3) return pointInPolygon(x, z, o.points);
   return Math.abs(x - o.xM) <= o.widthM / 2 && Math.abs(z - o.zM) <= o.heightM / 2;
 }
 

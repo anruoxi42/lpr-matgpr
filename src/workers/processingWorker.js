@@ -24,7 +24,7 @@ function buildAxis(count, step, offset = 0) {
 
 function withUpdatedMeta(result, dataset, params = {}) {
   const axes = axisParams(dataset, params);
-  const meta = { ...(dataset.meta || {}) };
+  const meta = { ...(dataset.meta || {}), ...(result.meta || {}) };
   const sampleStart = result.sampleStart || 0;
   const dtNs = result.dtNs || axes.dtNs;
   const dxM = result.dxM || axes.dxM;
@@ -44,10 +44,10 @@ function withUpdatedMeta(result, dataset, params = {}) {
     meta.depthAxisM = result.depthAxisM || buildAxis(result.numSamples, result.depthStep || 1);
   } else {
     meta.verticalAxisKind = "time";
-    meta.timeAxisNs = buildAxis(result.numSamples, dtNs, sampleStart * axes.dtNs);
+    meta.timeAxisNs = result.meta?.timeAxisNs || result.timeAxisNs || buildAxis(result.numSamples, dtNs, sampleStart * axes.dtNs);
     meta.tt2w = meta.timeAxisNs;
   }
-  meta.distanceAxisM = buildAxis(result.numTraces, dxM);
+  meta.distanceAxisM = result.distanceAxisM || result.x || result.srcx || meta.distanceAxisM || buildAxis(result.numTraces, dxM);
   meta.x = meta.distanceAxisM;
   if (result.vofh || params.vofh) meta.vofh = result.vofh || params.vofh;
   if (result.badTraces) meta.badTraces = result.badTraces;
@@ -178,6 +178,14 @@ self.onmessage = ({ data }) => {
         model2d: model,
         name: "p5_2_Model"
       };
+    }
+    else if (op === "split-step-forward2d") {
+      const model = params.model2d || params.model;
+      if (!model) throw new Error("Split-step forward requires a model2d payload.");
+      const progress = detail => self.postMessage({ id, progress: true, detail });
+      r = A.splitStepForward2d(model, { ...(params.forward || params), onProgress: progress });
+      r.model2d = model;
+      r.name = "split_step_forward2d";
     }
     else if (op === "fdtd-tm2d" || op === "fdtd-te2d") {
       const model = params.model2d || params.model;

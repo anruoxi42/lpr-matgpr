@@ -4,7 +4,7 @@ import { IpdStore } from "./processing/ipdStore.js";
 import { depthAxisFromVofh, parseVofh, spectrum, fkSpectrum } from "./processing/algorithms.js";
 import { pickPeaksNearPoint, traceFromSeed, snapPointToPeak } from "./processing/peakTracking.js";
 import { RadarRenderer, drawLine } from "./visualization/radarRenderer.js";
-import { DEFAULT_MODEL_MATERIALS, manualHorizonsToModel, normalizeObject, prepareFdtdGridFromModel } from "./modeling/model2d.js";
+import { DEFAULT_MODEL_MATERIALS, createIrregularBodyObject, manualHorizonsToModel, normalizeObject, prepareFdtdGridFromModel } from "./modeling/model2d.js";
 import { MATERIAL_PRESETS } from "./modeling/materials.js";
 import { variablesFromCurrentDataset, variablesFromForwardResult, variablesFromModelGrid, variablesFromP5Dielectric, writeMatFile } from "./io/mat.js";
 import { parseMatFileAsync } from "./io/mat-reader.js";
@@ -27,12 +27,12 @@ let modelTool = "select";
 let modelViewMode = "geology";
 let modelDraftPolygon = [];
 let modelHitCycle = { key: "", ids: [], index: -1 };
-let modelToolDefaults = { circleRadiusM: 0.25, pipeRadiusM: 0.18, rectangleWidthM: 0.8, rectangleHeightM: 0.45 };
+let modelToolDefaults = { irregularRadiusM: 0.25 };
 let fdtdSrcPulse = null;
 let fdtdP5Preset = false;
 let randomP5State = { activeStep: "p5_1", dielectric: null, model2d: null, fdtd: null, params: null };
 const MODEL_MATERIAL_IDS = new Set(MATERIAL_PRESETS.map(m => m.id));
-const MODEL_TYPE_LABELS = { circle: "圆形", rectangle: "矩形", pipe: "管道", polygon: "多边形", ellipse: "椭圆" };
+const MODEL_TYPE_LABELS = { irregular: "不规则体", polygon: "不规则体", circle: "圆形", rectangle: "矩形", pipe: "管道", ellipse: "椭圆" };
 let activeFdtdCancel = null;
 let fdtdCapabilitiesCache = null;
 let radarSelections = [];
@@ -181,7 +181,7 @@ function resetProcessingWorker(reason = new Error("Processing worker restarted."
 function runWorker(op, dataset, params = {}, options = {}) {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
-    const entry = { resolve, reject, op, startedAt: performance.now(), timeoutId: null };
+    const entry = { resolve, reject, op, startedAt: performance.now(), timeoutId: null, cancelMessage: options.cancelMessage || "计算已取消。", statusLabel: options.statusLabel || op.toUpperCase() };
     if (options.timeoutMs) {
       entry.timeoutId = setTimeout(() => {
         if (!pending.has(id)) return;
@@ -197,11 +197,12 @@ function runWorker(op, dataset, params = {}, options = {}) {
         if (!pending.has(id)) return;
         pending.delete(id);
         if (entry.timeoutId) clearTimeout(entry.timeoutId);
-        reject(new Error("FDTD canceled."));
-        resetProcessingWorker(new Error("FDTD canceled."));
+        const err = new Error(entry.cancelMessage);
+        reject(err);
+        resetProcessingWorker(err);
       });
     }
-    const needsDatasetData = op !== "fdtd-tm2d" && op !== "fdtd-te2d";
+    const needsDatasetData = op !== "fdtd-tm2d" && op !== "fdtd-te2d" && op !== "split-step-forward2d";
     const copy = needsDatasetData ? new Float32Array(dataset.data) : new Float32Array(0);
     worker.postMessage({ id, op, params: normalizeWorkerParams(dataset, params), dataset: { ...dataset, data: copy.buffer } }, [copy.buffer]);
   });
@@ -212,12 +213,12 @@ function handleWorkerMessage({ data }) {
   if (!p) return;
   if (data.progress) {
     const pct = Math.max(0, Math.min(100, Math.round((data.detail?.progress || 0) * 100)));
-    updateFdtdStatus(`${p.op.toUpperCase()} ${pct}%`, data.detail);
+    updateFdtdStatus(`${p.statusLabel} ${pct}%`, data.detail);
     return;
   }
   pending.delete(data.id);
   if (p.timeoutId) clearTimeout(p.timeoutId);
-  if (activeFdtdCancel && /^fdtd-/.test(p.op)) setActiveFdtdCancel(null);
+  if (activeFdtdCancel && (/^fdtd-/.test(p.op) || p.op === "split-step-forward2d")) setActiveFdtdCancel(null);
   data.ok ? p.resolve(data.result) : p.reject(new Error(data.error));
 }
 
@@ -3542,27 +3543,54 @@ function collectRandomP5Params() {
   };
 }
 
-function collectRandomFdtdParams(modelPayload) {
+function collectRandomForwardParams(modelPayload) {
   const step = modelPayload?.distanceStepM || finiteNumber($("#p5-intdis")?.value, 0.02);
   const samples = Math.max(16, Math.floor(finiteNumber($("#p5-fdtd-samples")?.value, 640)));
-  const outstep = Math.max(1, Math.floor(finiteNumber($("#p5-fdtd-outstep")?.value, 10)));
-  const fdtd = {
+  return {
     traceCount: Math.max(1, Math.floor(finiteNumber($("#p5-fdtd-traces")?.value, 451))),
     samples,
     frequencyHz: Math.max(1, finiteNumber($("#p5-fdtd-frequency")?.value, 500) * 1e6),
-    receiverOffsetM: finiteNumber($("#p5-fdtd-offset")?.value, 0.317),
-    npml: Math.max(2, Math.floor(finiteNumber($("#p5-fdtd-pml")?.value, 10))),
-    outstep,
-    airThicknessM: Math.max(0, finiteNumber($("#p5-fdtd-air")?.value, 0.6)),
-    antennaZ: finiteNumber($("#p5-fdtd-antenna-z")?.value, -0.3),
-    p5Mode: true,
-    dtS: 0.3125e-9 / 10,
-    iterations: samples * outstep,
+    frequencyMHz: Math.max(1, finiteNumber($("#p5-fdtd-frequency")?.value, 500)),
+    dtNs: 0.3125,
+    dtS: 0.3125e-9,
+    band: 1,
     startX: 50 * step,
-    endX: 950 * step,
-    srcpulse: shiftedP5SrcPulse(samples, outstep)
+    endX: 950 * step
   };
-  return fdtd;
+}
+
+function collectManualForwardParams(modelPayload) {
+  const ds = currentDisplayed();
+  const rp = getEffectiveRadarParams(ds);
+  const samples = Math.max(16, Math.floor(Number($("#fdtd-samples")?.value || 260)));
+  const frequencyMHz = Math.max(1, Number($("#fdtd-frequency")?.value || 500));
+  const dtNs = fdtdP5Preset ? 0.3125 : finiteNumber(rp.dtNs, 0.625);
+  const params = {
+    traceCount: Math.max(1, Math.floor(Number($("#fdtd-traces")?.value || Math.min(80, modelPayload.nx)))),
+    samples,
+    frequencyHz: frequencyMHz * 1e6,
+    frequencyMHz,
+    dtNs,
+    dtS: dtNs * 1e-9,
+    band: 1
+  };
+  if (fdtdP5Preset) {
+    const step = modelPayload.distanceStepM || 0.02;
+    params.startX = 50 * step;
+    params.endX = 950 * step;
+  }
+  return params;
+}
+
+async function runSplitStepForward(modelPayload, forward, dataset = randomWorkerDataset()) {
+  updateFdtdStatus("快速正演 / Split-step running...");
+  const result = await runWorker("split-step-forward2d", dataset || randomWorkerDataset(), { model2d: modelPayload, forward }, {
+    cancelable: true,
+    cancelMessage: "快速正演已取消。",
+    statusLabel: "快速正演 / Split-step"
+  });
+  result.backend = "js-worker-split-step";
+  return result;
 }
 
 function selectedFdtdBackend(controlId) {
@@ -3830,13 +3858,11 @@ async function runRandomP5Step(step = randomP5State.activeStep) {
       toast("p5_2 电磁参数换算已完成");
     } else {
       const modelPayload = await ensureRandomConductivityModel();
-      const fdtd = collectRandomFdtdParams(modelPayload);
-      if (!fdtd.srcpulse) toast("P2_pulse_new.mat 未加载，p5 正演将使用内置 Ricker 脉冲。", "warn");
-      const mode = $("#p5-fdtd-mode")?.value || "tm";
-      const result = await runFdtdComputation({ mode, modelPayload, fdtd, dataset: randomWorkerDataset(), workflow: "random-p5", backendControlId: "p5-fdtd-backend", diagnosticsId: "p5-fdtd-diagnostics" });
+      const forward = collectRandomForwardParams(modelPayload);
+      const result = await runSplitStepForward(modelPayload, forward, randomWorkerDataset());
       randomP5State = { ...randomP5State, activeStep: step, fdtd: result };
-      downloadMatWithPrompt(variablesFromForwardResult(result, modelPayload, { workflow: "random-p5", mode, ...fdtd }), "p5_3_radar_gram.mat");
-      toast(`p5_3 ${mode.toUpperCase()} FDTD 仿真已完成`);
+      downloadMatWithPrompt(variablesFromForwardResult(result, modelPayload, { workflow: "random-p5", algorithm: "split-step-forward2d", ...forward }), "p5_3_radar_gram.mat");
+      toast("p5_3 快速正演已完成");
     }
     $("#footer-status").textContent = `${step} completed`;
     renderRandomP5Workbench();
@@ -4048,8 +4074,8 @@ function markModel2dDirty() {
 }
 
 function setModelTool(tool) {
-  modelTool = tool || "select";
-  if (modelTool !== "polygon" && modelDraftPolygon.length) modelDraftPolygon = [];
+  modelTool = ["select", "irregular"].includes(tool) ? tool : "select";
+  if (modelDraftPolygon.length) modelDraftPolygon = [];
   $$("[data-model-tool]").forEach(btn => btn.classList.toggle("active", btn.dataset.modelTool === modelTool));
   updateModelCursor();
   renderModel();
@@ -4236,7 +4262,7 @@ function drawModelObjects(ctx, rect, result) {
     ctx.strokeStyle = o.id === selectedModelObjectId ? "#fff" : canvasTheme.gold || canvasTheme.t0;
     ctx.lineWidth = o.id === selectedModelObjectId ? 2 : 1.3;
     if (o.type === "circle" || o.type === "pipe") { ctx.beginPath(); ctx.arc(p.x, p.y, pxRadius, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
-    else if (o.type === "polygon" && o.points.length >= 3) {
+    else if ((o.type === "polygon" || o.type === "irregular") && o.points.length >= 3) {
       ctx.beginPath(); o.points.forEach((pt, i) => { const pp = modelWorldToCanvas(pt.xM, pt.zM, rect, result); if (i) ctx.lineTo(pp.x, pp.y); else ctx.moveTo(pp.x, pp.y); }); ctx.closePath(); ctx.fill(); ctx.stroke();
     } else {
       const w = Math.abs((p2.x - p.x) * 2), h = Math.abs((p2.y - p.y) * 2);
@@ -4299,31 +4325,54 @@ function syncModelObjectForm() {
   const object = model.objects.find(o => o.id === selectedModelObjectId) || null;
   for (const id of ["model-object-type","model-object-x","model-object-z","model-object-width","model-object-height","model-object-radius","model-object-epsr","model-object-sigma","model-object-mu"]) { const el = $(`#${id}`); if (el) el.disabled = !object; }
   if (!object) return;
-  $("#model-object-type").value = object.type; $("#model-object-x").value = axisNumber(object.xM); $("#model-object-z").value = axisNumber(object.zM); $("#model-object-width").value = axisNumber(object.widthM); $("#model-object-height").value = axisNumber(object.heightM); $("#model-object-radius").value = axisNumber(object.radiusM); $("#model-object-epsr").value = materialNumber(object.epsr); $("#model-object-sigma").value = materialNumber(object.sigma); $("#model-object-mu").value = materialNumber(object.mu);
+  const fields = {
+    "model-object-type": object.type,
+    "model-object-x": axisNumber(object.xM),
+    "model-object-z": axisNumber(object.zM),
+    "model-object-width": axisNumber(object.widthM),
+    "model-object-height": axisNumber(object.heightM),
+    "model-object-radius": axisNumber(object.radiusM),
+    "model-object-epsr": materialNumber(object.epsr),
+    "model-object-sigma": materialNumber(object.sigma),
+    "model-object-mu": materialNumber(object.mu)
+  };
+  for (const [id, value] of Object.entries(fields)) {
+    const el = $(`#${id}`);
+    if (el) el.value = value;
+  }
 }
 
 function updateSelectedModelObject() {
   ensureUniqueModelObjectIds();
   const object = model.objects.find(o => o.id === selectedModelObjectId);
   if (!object) return;
-  Object.assign(object, normalizeObject({ ...object, type: $("#model-object-type")?.value || object.type, xM: Number($("#model-object-x")?.value), zM: Number($("#model-object-z")?.value), widthM: Number($("#model-object-width")?.value), heightM: Number($("#model-object-height")?.value), radiusM: Number($("#model-object-radius")?.value), epsr: Number($("#model-object-epsr")?.value), sigma: Number($("#model-object-sigma")?.value), mu: Number($("#model-object-mu")?.value) }));
+  const nextX = Number($("#model-object-x")?.value);
+  const nextZ = Number($("#model-object-z")?.value);
+  const nextRadius = Number($("#model-object-radius")?.value);
+  moveModelObjectTo(object, Number.isFinite(nextX) ? nextX : object.xM, Number.isFinite(nextZ) ? nextZ : object.zM);
+  if (Number.isFinite(nextRadius) && nextRadius > 0) setModelObjectRadius(object, nextRadius);
+  Object.assign(object, normalizeObject({
+    ...object,
+    type: object.type || "irregular",
+    epsr: Number($("#model-object-epsr")?.value),
+    sigma: Number($("#model-object-sigma")?.value),
+    mu: Number($("#model-object-mu")?.value)
+  }));
   markModel2dDirty();
   renderModel();
   syncModelObjectForm();
 }
 
 function addModelObject(type, world) {
-  const preset = type === "pipe" ? MATERIAL_PRESETS.find(m => m.id === "pipe") : MATERIAL_PRESETS.find(m => m.id === "rock");
+  const preset = MATERIAL_PRESETS.find(m => m.id === "rock");
   const material = preset ? { materialId: preset.id, name: preset.name, epsr: preset.epsr, sigma: preset.sigma, mu: preset.mu } : { materialId: "custom" };
-  const object = normalizeObject({
-    type,
+  const object = createIrregularBodyObject({
     xM: world.xM,
     zM: world.zM,
-    widthM: type === "rectangle" ? modelToolDefaults.rectangleWidthM : 0.5,
-    heightM: type === "rectangle" ? modelToolDefaults.rectangleHeightM : 0.5,
-    radiusM: type === "pipe" ? modelToolDefaults.pipeRadiusM : modelToolDefaults.circleRadiusM,
+    radiusM: modelToolDefaults.irregularRadiusM,
     ...material,
-    id: createModelObjectId()
+    id: createModelObjectId(),
+    seed: Date.now() + Math.floor(Math.random() * 1e6)
   });
   model.objects.push(object); selectedModelObjectId = object.id; markModel2dDirty(); renderModel(); syncModelObjectForm();
 }
@@ -4350,7 +4399,7 @@ function hitModelObject(world) {
 function modelObjectContains(world, object) {
   const o = object;
   if (o.type === "circle" || o.type === "pipe") return (world.xM - o.xM) ** 2 + (world.zM - o.zM) ** 2 <= o.radiusM ** 2;
-  if (o.type === "polygon" && o.points.length >= 3) return pointInWorldPolygon(world, o.points);
+  if ((o.type === "polygon" || o.type === "irregular") && o.points.length >= 3) return pointInWorldPolygon(world, o.points);
   if (o.type === "ellipse") return ((world.xM - o.xM) / (o.widthM / 2)) ** 2 + ((world.zM - o.zM) / (o.heightM / 2)) ** 2 <= 1;
   return Math.abs(world.xM - o.xM) <= o.widthM / 2 && Math.abs(world.zM - o.zM) <= o.heightM / 2;
 }
@@ -4372,14 +4421,47 @@ function polygonCenter(points = []) {
   };
 }
 
+function polygonRadius(points = [], center = polygonCenter(points)) {
+  let radius = 0;
+  for (const p of points) radius = Math.max(radius, Math.hypot((p.xM || 0) - center.xM, (p.zM || 0) - center.zM));
+  return radius || 0.01;
+}
+
+function moveModelObjectTo(object, xM, zM) {
+  const dx = xM - Number(object.xM || 0);
+  const dz = zM - Number(object.zM || 0);
+  object.xM = xM;
+  object.zM = zM;
+  if ((object.type === "polygon" || object.type === "irregular") && object.points?.length) {
+    object.points = object.points.map(p => ({ xM: p.xM + dx, zM: p.zM + dz }));
+  }
+}
+
+function setModelObjectRadius(object, radiusM) {
+  const next = Math.max(0.01, Number(radiusM) || 0.01);
+  if ((object.type === "polygon" || object.type === "irregular") && object.points?.length) {
+    const c = { xM: Number(object.xM || 0), zM: Number(object.zM || 0) };
+    const current = Math.max(0.01, Number(object.radiusM) || polygonRadius(object.points, c));
+    const f = next / current;
+    object.points = object.points.map(p => ({ xM: c.xM + (p.xM - c.xM) * f, zM: c.zM + (p.zM - c.zM) * f }));
+  }
+  object.radiusM = next;
+  object.widthM = next * 2;
+  object.heightM = next * 2;
+}
+
 function resizeModelObject(object, factor) {
   if (!object) return;
   const f = Math.max(0.2, Math.min(5, factor));
   if (object.type === "circle" || object.type === "pipe") object.radiusM = Math.max(0.01, object.radiusM * f);
-  else if (object.type === "polygon" && object.points?.length) {
+  else if ((object.type === "polygon" || object.type === "irregular") && object.points?.length) {
     const c = polygonCenter(object.points);
+    const currentRadius = Number(object.radiusM) || polygonRadius(object.points, c);
     object.points = object.points.map(p => ({ xM: c.xM + (p.xM - c.xM) * f, zM: c.zM + (p.zM - c.zM) * f }));
     object.xM = c.xM; object.zM = c.zM;
+    object.radiusM = Math.max(0.01, currentRadius * f);
+    object.widthM = object.radiusM * 2;
+    object.heightM = object.radiusM * 2;
   } else {
     object.widthM = Math.max(0.01, object.widthM * f);
     object.heightM = Math.max(0.01, object.heightM * f);
@@ -4387,19 +4469,12 @@ function resizeModelObject(object, factor) {
 }
 
 function adjustModelToolDefault(factor) {
-  if (modelTool === "pipe") modelToolDefaults.pipeRadiusM = Math.max(0.01, modelToolDefaults.pipeRadiusM * factor);
-  else if (modelTool === "rectangle") {
-    modelToolDefaults.rectangleWidthM = Math.max(0.02, modelToolDefaults.rectangleWidthM * factor);
-    modelToolDefaults.rectangleHeightM = Math.max(0.02, modelToolDefaults.rectangleHeightM * factor);
-  } else modelToolDefaults.circleRadiusM = Math.max(0.01, modelToolDefaults.circleRadiusM * factor);
+  modelToolDefaults.irregularRadiusM = Math.max(0.01, modelToolDefaults.irregularRadiusM * factor);
 }
 
 function modelCursor(tool) {
   const cursorSvg = shape => `url("data:image/svg+xml;utf8,${shape}") 12 12, crosshair`;
-  if (tool === "circle") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='8' fill='none' stroke='%23ffffff' stroke-width='2'/><path d='M12 3v18M3 12h18' stroke='%23c9a96e' stroke-width='1'/></svg>");
-  if (tool === "rectangle") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><rect x='5' y='7' width='14' height='10' fill='none' stroke='%23ffffff' stroke-width='2'/><path d='M12 3v18M3 12h18' stroke='%23c9a96e' stroke-width='1'/></svg>");
-  if (tool === "pipe") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='8' fill='none' stroke='%23ffffff' stroke-width='2'/><circle cx='12' cy='12' r='4' fill='none' stroke='%23c9a96e' stroke-width='2'/></svg>");
-  if (tool === "polygon") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='3' fill='%23ffffff'/><path d='M12 4v4M12 16v4M4 12h4M16 12h4' stroke='%23c9a96e' stroke-width='1.5'/></svg>");
+  if (tool === "irregular") return cursorSvg("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><path d='M7 6 15 4 20 10 17 18 9 20 4 14Z' fill='none' stroke='%23ffffff' stroke-width='2'/><path d='M12 3v18M3 12h18' stroke='%23c9a96e' stroke-width='1'/></svg>");
   return "default";
 }
 
@@ -4413,6 +4488,8 @@ bindModel = function bindModelV2() {
   if (!cv) return;
   updateModelCursor();
   cv.addEventListener("contextmenu", e => {
+    e.preventDefault();
+    return;
     if (modelTool !== "polygon") return;
     e.preventDefault();
     if (modelDraftPolygon.length < 3) { toast("多边形至少需要 3 个点", "warn"); return; }
@@ -4421,7 +4498,7 @@ bindModel = function bindModelV2() {
     model.objects.push(object); selectedModelObjectId = object.id; modelDraftPolygon = []; markModel2dDirty(); renderModel(); syncModelObjectForm();
   });
   cv.addEventListener("wheel", e => {
-    if (!["circle", "rectangle", "pipe", "polygon", "select"].includes(modelTool)) return;
+    if (!["irregular", "select"].includes(modelTool)) return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.08 : 0.92;
     const object = model.objects.find(o => o.id === selectedModelObjectId);
@@ -4443,19 +4520,16 @@ bindModel = function bindModelV2() {
       if (hit) modelDrag = { id: hit.id, start: world, ox: hit.xM, oz: hit.zM };
       return;
     }
-    if (modelTool === "polygon") {
-      modelDraftPolygon.push(world);
-      renderModel(); return;
-    }
-    addModelObject(modelTool === "circle" ? "circle" : modelTool === "pipe" ? "pipe" : "rectangle", world);
+    addModelObject("irregular", world);
   });
   cv.addEventListener("mousemove", e => {
     if (!modelDrag) return;
     const rect = cv.getBoundingClientRect(), result = model2dResult || rebuildModel2d(), world = modelCanvasToWorld(e.clientX - rect.left, e.clientY - rect.top, rect, result), object = model.objects.find(o => o.id === modelDrag.id);
     if (!object) return;
     const bounds = modelAxisBounds(result);
-    object.xM = Math.max(bounds.xMin, Math.min(bounds.xMax, modelDrag.ox + world.xM - modelDrag.start.xM));
-    object.zM = Math.max(bounds.zMin, Math.min(bounds.zMax, modelDrag.oz + world.zM - modelDrag.start.zM));
+    const nextX = Math.max(bounds.xMin, Math.min(bounds.xMax, modelDrag.ox + world.xM - modelDrag.start.xM));
+    const nextZ = Math.max(bounds.zMin, Math.min(bounds.zMax, modelDrag.oz + world.zM - modelDrag.start.zM));
+    moveModelObjectTo(object, nextX, nextZ);
     markModel2dDirty();
     renderModel(); syncModelObjectForm();
   });
@@ -4499,48 +4573,30 @@ async function buildModel2dOutput() {
   downloadMatWithPrompt(variablesFromModelGrid(result, { workflow: "manual-snapshot", ...params }), "manual_2d_model.mat");
 }
 
-forwardModel = async function forwardModelV2(mode = "tm") {
-  const ds = currentDisplayed();
-  if (!ds) return toast("Import data before FDTD forward modeling.", "warn");
+forwardModel = async function forwardModelV2(mode = "split-step") {
+  const ds = currentDisplayed() || randomWorkerDataset();
   const modelPayload = rebuildModel2d();
-  const fdtd = {
-    traceCount: Math.max(1, Math.floor(Number($("#fdtd-traces")?.value || Math.min(80, modelPayload.nx)))),
-    samples: Math.max(16, Math.floor(Number($("#fdtd-samples")?.value || 260))),
-    frequencyHz: Math.max(1, Number($("#fdtd-frequency")?.value || 500) * 1e6),
-    receiverOffsetM: finiteNumber($("#fdtd-offset")?.value, 0.317),
-    npml: Math.max(2, Math.floor(Number($("#fdtd-pml")?.value || 8))),
-    outstep: Math.max(1, Math.floor(Number($("#fdtd-outstep")?.value || 1))),
-    airThicknessM: Math.max(0, Number($("#fdtd-air")?.value || 0.6)),
-    antennaZ: finiteNumber($("#fdtd-antenna-z")?.value, -0.3)
-  };
-  if (fdtdP5Preset) {
-    const step = modelPayload.distanceStepM || 0.02;
-    fdtd.p5Mode = true;
-    fdtd.dtS = 0.3125e-9 / 10;
-    fdtd.iterations = fdtd.samples * fdtd.outstep;
-    fdtd.startX = 50 * step;
-    fdtd.endX = 950 * step;
-    fdtd.srcpulse = shiftedP5SrcPulse(fdtd.samples, fdtd.outstep);
-    if (!fdtd.srcpulse) toast("P2_pulse_new.mat 未加载，p5 正演将使用内置 Ricker 脉冲。", "warn");
-  }
-  $("#footer-status").textContent = `${mode.toUpperCase()} FDTD running...`;
+  const forward = collectManualForwardParams(modelPayload);
+  $("#footer-status").textContent = "快速正演 / Split-step running...";
   try {
-    fdtdForwardResult = await runFdtdComputation({ mode, modelPayload, fdtd, dataset: ds, workflow: "manual-snapshot", backendControlId: "fdtd-backend", diagnosticsId: "fdtd-diagnostics" });
-    store.setOutput({ ...fdtdForwardResult, name: `${mode}_fdtd_forward` }, { name: `${mode.toUpperCase()} FDTD Forward`, op: `fdtd-${mode}2d`, params: fdtd });
+    fdtdForwardResult = await runSplitStepForward(modelPayload, forward, ds);
+    const output = { ...fdtdForwardResult, name: "split_step_forward" };
+    if (store.current) store.setOutput(output, { name: "Split-step Forward", op: "split-step-forward2d", params: forward });
+    else store.loadDataset(output);
     displaySource = "output"; $("#display-mode").value = "output"; refresh();
-    $("#footer-status").textContent = `${mode.toUpperCase()} FDTD completed`;
-    downloadMatWithPrompt(variablesFromForwardResult(fdtdForwardResult, model2dResult || rebuildModel2d(), { workflow: "manual-snapshot", mode, ...fdtd }), `manual_${mode}_fdtd.mat`);
-    toast(`${mode.toUpperCase()} FDTD forward result generated.`);
+    $("#footer-status").textContent = "快速正演 / Split-step completed";
+    downloadMatWithPrompt(variablesFromForwardResult(fdtdForwardResult, model2dResult || rebuildModel2d(), { workflow: "manual-snapshot", requestedMode: mode, algorithm: "split-step-forward2d", ...forward }), "manual_split_step_forward.mat");
+    toast("快速正演结果已生成");
   } catch (error) {
-    $("#footer-status").textContent = "FDTD failed";
+    $("#footer-status").textContent = "快速正演失败";
     toast(error.message || String(error), "err");
   }
 };
 
 function exportModelMat() {
   const result = fdtdForwardResult || store.output;
-  if (!result?.data?.length) return toast("Run FDTD before exporting MAT.", "warn");
-  downloadMatWithPrompt(variablesFromForwardResult(result, model2dResult || rebuildModel2d(), currentModelOptions()), "lpr_fdtd_forward.mat");
+  if (!result?.data?.length) return toast("请先运行快速正演再导出 MAT。", "warn");
+  downloadMatWithPrompt(variablesFromForwardResult(result, model2dResult || rebuildModel2d(), currentModelOptions()), "lpr_split_step_forward.mat");
 }
 
 function exportModelPng() {
