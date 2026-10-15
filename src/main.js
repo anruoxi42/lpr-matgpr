@@ -3301,7 +3301,7 @@ function bindUi() {
     if (action === "velocity-calc") simpleVelocityCalc();
     if (action === "velocity-1d") toast("1-D velocity model 已使用速度点表作为第一版模型。", "warn");
     if (action === "velocity-2d") toast("2-D velocity model 可由 Model Builder 生成。", "warn");
-    if (action === "forward") forwardModel();
+    if (action === "quick-forward" || action === "forward") runQuickForward();
     if (action === "p5-run-step") runRandomP5Step();
     if (action === "make-xyz") toast("Make XYZ 已建立入口：第一版使用 .2B 位置元数据或手动测线间距。", "warn");
     if (action === "create-3d") create3D();
@@ -3911,14 +3911,47 @@ function renderRandomP5Workbench() {
   }
 }
 
-function forwardModel() {
-  const nt = 300, ns = 512, data = new Float32Array(nt*ns);
-  for (const o of model.objects) {
-    const x0 = Math.round((o.x / Math.max(1, $("#model-canvas").clientWidth)) * nt), z0 = Math.round((o.y / Math.max(1, $("#model-canvas").clientHeight)) * ns), amp = (o.epsr || 10) / 10;
-    for (let t=0;t<nt;t++){ const s=Math.round(Math.sqrt(z0*z0+(t-x0)*(t-x0)*.8)); if(s>=0&&s<ns)data[t*ns+s]+=amp; }
+function runQuickForward() {
+  const source = currentDisplayed();
+  if (!source?.data?.length) return toast("请先导入雷达数据", "warn");
+  if (!model.objects.length) return toast("二维模型中没有异常体，请先添加圆形、管道或其他异常体", "warn");
+
+  const nt = source.numTraces, ns = source.numSamples;
+  const data = new Float32Array(nt * ns);
+  const modelPayload = rebuildModel2d();
+  const bounds = modelAxisBounds(modelPayload);
+  const xSpan = Math.max(1e-9, bounds.xMax - bounds.xMin);
+  const zSpan = Math.max(1e-9, bounds.zMax - bounds.zMin);
+
+  for (const rawObject of model.objects) {
+    const object = normalizeObject(rawObject);
+    const x0 = Math.round((object.xM - bounds.xMin) / xSpan * Math.max(0, nt - 1));
+    const z0 = Math.round((object.zM - bounds.zMin) / zSpan * Math.max(0, ns - 1));
+    const amp = (object.epsr || 10) / 10;
+    for (let trace = 0; trace < nt; trace++) {
+      const sample = Math.round(Math.sqrt(z0 * z0 + (trace - x0) * (trace - x0) * 0.8));
+      if (sample >= 0 && sample < ns) data[trace * ns + sample] += amp;
+    }
   }
-  store.setOutput({ data, numTraces:nt, numSamples:ns, name:"forward_model" }, { name:"正演模拟", op:"forward", params:{objects:model.objects.length} });
-  displaySource = "output"; $("#display-mode").value = "output"; toast("正演模拟已生成 Output Data");
+
+  store.setOutput({
+    data,
+    numTraces: nt,
+    numSamples: ns,
+    name: `${source.name || "radar"}_quick_forward`,
+    meta: source.meta,
+    dtNs: source.dtNs,
+    dxM: source.dxM
+  }, {
+    name: "快速正演",
+    op: "quick-forward",
+    params: { objects: model.objects.length, sourceTraces: nt, sourceSamples: ns }
+  });
+  displaySource = "output";
+  $("#display-mode").value = "output";
+  $("#footer-status").textContent = `快速正演完成 · ${nt} 道 × ${ns} 样点`;
+  refresh();
+  toast("快速正演已生成 Output Data");
 }
 
 function modelLayerDefault(index) {
@@ -4499,7 +4532,7 @@ async function buildModel2dOutput() {
   downloadMatWithPrompt(variablesFromModelGrid(result, { workflow: "manual-snapshot", ...params }), "manual_2d_model.mat");
 }
 
-forwardModel = async function forwardModelV2(mode = "tm") {
+async function forwardModel(mode = "tm") {
   const ds = currentDisplayed();
   if (!ds) return toast("Import data before FDTD forward modeling.", "warn");
   const modelPayload = rebuildModel2d();
@@ -4535,7 +4568,7 @@ forwardModel = async function forwardModelV2(mode = "tm") {
     $("#footer-status").textContent = "FDTD failed";
     toast(error.message || String(error), "err");
   }
-};
+}
 
 function exportModelMat() {
   const result = fdtdForwardResult || store.output;
